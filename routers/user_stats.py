@@ -553,11 +553,7 @@ def get_chat_examples(payload: dict = Depends(verify_token)):
                     return {"examples": examples}
     except Exception:
         pass
-    return {"examples": [
-        "【目的】新規指名を月10件増やす\n【現状】月100本・新規10前後で1年推移\n【制約】1日3時間・SNS運用中\n【出力】戦略と優先アクション3件",
-        "【目的】リピート率を80%以上にする\n【現状】現在60%・接客時間60分\n【制約】価格変更不可\n【出力】具体的施策と計測指標",
-        "【目的】競合との差別化を明確化\n【現状】同エリアに5店舗競合\n【制約】宣材写真3枚のみ\n【出力】差別化軸と訴求文案",
-    ]}
+    return {"examples": []}
 
 @router.get("/purpose_modes")
 def get_purpose_modes(payload: dict = Depends(verify_token)):
