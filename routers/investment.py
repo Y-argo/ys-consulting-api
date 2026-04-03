@@ -157,38 +157,57 @@ def get_investment_analysis(payload: dict = Depends(verify_token)):
         latest = result[0]
         goal_list = latest.get("goal_bottom", [])
         watch_list = latest.get("watch_big_sell", [])
-        
+
+        # 3日分トレンドサマリー生成
+        def _trend_summary(result_list):
+            lines = []
+            for r in result_list:
+                date = r.get("asof_date", "")
+                g = sorted(r.get("goal_bottom", []), key=lambda x: float(x.get("rank_score", 0)), reverse=True)[:5]
+                w = sorted(r.get("watch_big_sell", []), key=lambda x: float(x.get("sell_score", 0)), reverse=True)[:5]
+                g_codes = ", ".join([f"{x.get('code')}({float(x.get('rank_score',0)):.2f})" for x in g])
+                w_codes = ", ".join([f"{x.get('code')}({float(x.get('sell_score',0)):.2f})" for x in w])
+                lines.append(f"[{date}] GOAL上位: {g_codes} | WATCH上位: {w_codes}")
+            return "\n".join(lines)
+
+        trend_summary = _trend_summary(result)
+
         # コンサル分析プロンプト
         goal_summary = "\n".join([
             f"・{r.get('code')} {r.get('company_name')} 終値{r.get('close')} "
-            f"bottom={r.get('bottom_score',0):.2f} rank={r.get('rank_score',0):.2f} "
+            f"bottom={float(r.get('bottom_score',0)):.2f} rank={float(r.get('rank_score',0)):.2f} "
             f"sector={r.get('sector','')}"
             for r in sorted(goal_list, key=lambda x: float(x.get('rank_score',0)), reverse=True)[:10]
         ])
         watch_summary = "\n".join([
             f"・{r.get('code')} {r.get('company_name')} 終値{r.get('close')} "
-            f"sell={r.get('sell_score',0):.2f} days={r.get('sell_days',0)}"
+            f"sell={float(r.get('sell_score',0)):.2f} days={r.get('sell_days',0)}"
             for r in sorted(watch_list, key=lambda x: float(x.get('sell_score',0)), reverse=True)[:10]
         ])
-        
-        prompt = f"""以下の投資シグナルデータを戦略コンサルタントとして分析せよ。JSONのみ出力。
 
-基準日: {latest.get('asof_date')}
-GOAL_BOTTOM（反発底打ち候補）上位10件:
-{goal_summary}
-
-WATCH_BIG_SELL（大口売り込み監視）上位10件:
-{watch_summary}
-
-出力形式:
-{{
-  "market_summary": "市場全体の状況と特徴（2-3行）",
-  "sector_analysis": [{{"sector":"セクター名","signal":"買い/売り/中立","reason":"理由"}}],
-  "top_picks": [{{"code":"銘柄コード","name":"社名","action":"買い検討/様子見/回避","reason":"根拠","risk":"リスク"}}],
-  "risk_alerts": [{{"title":"リスク名","detail":"詳細","severity":"high/mid/low"}}],
-  "strategy": "総合戦略提言（3-4行）",
-  "next_actions": ["アクション1", "アクション2", "アクション3"]
-}}"""
+        prompt = (
+            "あなたはファンダメンタルズとテクニカル両面に精通した戦略投資コンサルタントです。\n"
+            "以下の投資シグナルデータ（3日分トレンド含む）を分析し、JSONのみ出力せよ。\n\n"
+            "【共通ルール】\n"
+            "- 感想ではなく根拠ある分析を返すこと\n"
+            "- 数値を必ず引用すること\n"
+            "- JSON以外の余計な文を絶対に返さないこと\n"
+            "- 出力は必ず有効なJSONオブジェクトのみとすること\n\n"
+            f"【3日間トレンド（ランク推移）】\n{trend_summary}\n\n"
+            f"【最新基準日】: {latest.get('asof_date')}\n\n"
+            f"【GOAL_BOTTOM（反発底打ち候補）最新上位10件】\n{goal_summary}\n\n"
+            f"【WATCH_BIG_SELL（大口売り込み監視）最新上位10件】\n{watch_summary}\n\n"
+            "以下のJSONスキーマで返してください:\n"
+            "{\n"
+            '  "market_summary": "市場全体の状況と特徴（2-3行・数値引用必須）",\n'
+            '  "trend_insight": "3日間トレンドから読み取れる方向性・セクターローテーション",\n'
+            '  "sector_analysis": [{"sector": "セクター名", "signal": "買い/売り/中立", "trend": "上昇/下降/横ばい", "reason": "理由"}],\n'
+            '  "top_picks": [{"code": "銘柄コード", "name": "社名", "action": "買い検討/様子見/回避", "rank_trend": "上昇/下降/横ばい", "reason": "根拠", "risk": "リスク"}],\n'
+            '  "risk_alerts": [{"title": "リスク名", "detail": "詳細", "severity": "high/mid/low"}],\n'
+            '  "strategy": "総合戦略提言（3-4行・数値根拠必須）",\n'
+            '  "next_actions": ["アクション1", "アクション2", "アクション3"]\n'
+            "}"
+        )
 
         res = call_llm(
             system_prompt="あなたはファンダメンタルズとテクニカル両面に精通した戦略投資コンサルタントです。JSONのみ出力。",
