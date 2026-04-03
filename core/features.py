@@ -39,6 +39,46 @@ FEATURE_REGISTRY = {
         "category": "AIエンジン",
         "default_enabled": False,
     },
+    "diag_structure": {
+        "label": "構造診断タブ",
+        "category": "診断タブ",
+        "default_enabled": True,
+    },
+    "diag_issue": {
+        "label": "課題仮説タブ",
+        "category": "診断タブ",
+        "default_enabled": True,
+    },
+    "diag_comparison": {
+        "label": "比較分析タブ",
+        "category": "診断タブ",
+        "default_enabled": True,
+    },
+    "diag_contradiction": {
+        "label": "矛盾検知タブ",
+        "category": "診断タブ",
+        "default_enabled": True,
+    },
+    "diag_execution": {
+        "label": "実行計画タブ",
+        "category": "診断タブ",
+        "default_enabled": True,
+    },
+    "diag_investment": {
+        "label": "投資シグナルタブ",
+        "category": "診断タブ",
+        "default_enabled": False,
+    },
+    "diag_graph": {
+        "label": "思考マップタブ",
+        "category": "診断タブ",
+        "default_enabled": True,
+    },
+    "diag_file": {
+        "label": "ファイル診断タブ",
+        "category": "診断タブ",
+        "default_enabled": True,
+    },
 }
 
 

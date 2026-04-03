@@ -299,35 +299,163 @@ def run_consult(req: ConsultRequest, payload: dict = Depends(verify_token)):
     fw_str = "、".join(frameworks[:5]) if frameworks else "MECE・SWOT・3C・ロジックツリー・Issue Tree"
 
     if req.analysis_type == "structure":
-        prompt = f"""以下の入力を構造診断せよ。JSONで返せ。
-入力: {req.input_text}
-補足: {req.supplement}
-フレームワーク候補: {fw_str}
-出力形式: {{"summary":"全体要約","structure_layers":[{{"layer":"層名","content":"内容","strength":0.8}}],"key_bottleneck":"主要ボトルネック","recommended_framework":"推奨フレームワーク","next_actions":["アクション1"]}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の相談内容を構造診断してください。
+適用フレームワーク: {fw_str}
+
+【相談内容】
+{req.input_text}
+
+【補足情報】
+{req.supplement or "（なし）"}
+
+【共通ルール】
+- 感想ではなく分析を返すこと
+- 抽象語だけで逃げないこと
+- 不明点はmissing_informationに格納すること
+- 推測は推測として扱うこと
+- JSON以外の余計な文を絶対に返さないこと
+- 目的と手段を混同しないこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+【追加ルール（構造診断）】
+- 現象・表層原因・根因を必ず分離すること
+- 制約条件を必ず抽出すること
+- 打ち手は優先順位順に返すこと
+
+以下のJSONスキーマで返してください:
+{{
+  "issue_summary": "問題の要約（1〜2文）",
+  "observations": ["観測事実1", "観測事実2"],
+  "surface_causes": ["表層原因1", "表層原因2"],
+  "root_causes": ["根因1", "根因2"],
+  "constraints": ["制約1", "制約2"],
+  "priority_points": ["優先論点1", "優先論点2"],
+  "recommended_actions": ["打ち手1（優先度高）", "打ち手2", "打ち手3"],
+  "risks": ["リスク1", "リスク2"],
+  "missing_information": ["不足情報1", "不足情報2"]
+}}"""
 
     elif req.analysis_type == "issue":
-        prompt = f"""以下の状況から課題仮説を生成せよ。JSONで返せ。
-入力: {req.input_text}
-フレームワーク: {fw_str}
-出力形式: {{"hypotheses":[{{"hypothesis":"仮説","priority":"high/mid/low","evidence":"根拠","verification":"検証方法"}}],"root_cause":"根本原因","quick_wins":["即効策"]}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の内容から論点・仮説を設計してください。
+適用フレームワーク: {fw_str}
+
+【入力内容】
+{req.input_text}
+
+【共通ルール】
+- 感想ではなく分析を返すこと
+- 抽象語だけで逃げないこと
+- 不明点はmissing_informationに格納すること
+- JSON以外の余計な文を絶対に返さないこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+以下のJSONスキーマで返してください:
+{{
+  "main_issues": ["主要論点1", "主要論点2"],
+  "hypotheses": ["仮説1", "仮説2"],
+  "questions_to_verify": ["次に確認すべき質問1", "質問2"],
+  "required_data": ["必要なデータ1", "データ2"],
+  "decision_points": ["意思決定ポイント1", "ポイント2"]
+}}"""
 
     elif req.analysis_type == "comparison":
-        prompt = f"""以下の選択肢を多軸比較せよ。JSONで返せ。
-選択肢: {req.options or req.input_text}
-評価軸: コスト・リスク・効果・実現性・速度
-出力形式: {{"options":[{{"name":"選択肢名","scores":{{"cost":80,"risk":60,"effect":90,"feasibility":70,"speed":75}},"summary":"評価コメント"}}],"recommendation":"推奨選択肢","rationale":"理由"}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の複数案を比較分析してください。
+
+【比較対象案】
+{req.options or req.input_text}
+
+【追加コンテキスト】
+{req.supplement or "（なし）"}
+
+【共通ルール】
+- 感想ではなく分析を返すこと
+- JSON以外の余計な文を絶対に返さないこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+【追加ルール（比較表）】
+- すべて同じ比較軸で比較すること
+- 感覚論ではなく軸差で比較すること
+- スコアは1〜5の整数で評価すること（5が最良）
+- 最終推奨案を1つ返すこと
+
+以下のJSONスキーマで返してください:
+{{
+  "comparison_axes": ["収益性", "実行難易度", "初期コスト", "回収期間", "リスク"],
+  "options": [
+    {{
+      "name": "案の名前",
+      "scores": {{"収益性": 0, "実行難易度": 0, "初期コスト": 0, "回収期間": 0, "リスク": 0}},
+      "pros": ["長所1", "長所2"],
+      "cons": ["短所1", "短所2"],
+      "recommended_for": ["この案が向いているケース"]
+    }}
+  ],
+  "final_recommendation": "最終推奨案と理由"
+}}"""
 
     elif req.analysis_type == "contradiction":
-        prompt = f"""以下の戦略と方針の矛盾を検知せよ。JSONで返せ。
-戦略: {req.strategy or req.input_text}
-方針: {req.policy or req.supplement}
-出力形式: {{"contradictions":[{{"point":"矛盾点","severity":"high/mid/low","resolution":"解決策"}}],"consistency_score":70,"overall_assessment":"総合評価"}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の内容から矛盾・齟齬を検出してください。
+
+【戦略文】
+{req.strategy or req.input_text}
+
+【方針文】
+{req.policy or req.supplement or "（なし）"}
+
+【共通ルール】
+- 感想ではなく分析を返すこと
+- JSON以外の余計な文を絶対に返さないこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+【追加ルール（矛盾検出）】
+- 目的と手段の衝突を優先検出すること
+- KPIと戦略のズレも検出対象とすること
+- 矛盾がなければcontradictionsを空配列にすること
+
+以下のJSONスキーマで返してください:
+{{
+  "contradictions": [
+    {{
+      "type": "矛盾の種類（例: 目的手段衝突、KPIズレ、前提矛盾）",
+      "description": "矛盾の具体的な説明",
+      "why_problematic": "なぜ問題か",
+      "fix_direction": "修正方向"
+    }}
+  ],
+  "consistency_score": 70,
+  "overall_assessment": "総合評価"
+}}"""
 
     elif req.analysis_type == "execution":
-        prompt = f"""以下の目標に対する実行計画を生成せよ。JSONで返せ。
-目標・背景: {req.input_text}
-フレームワーク: {fw_str}
-出力形式: {{"phases":[{{"phase":"フェーズ名","duration":"期間","actions":["アクション"],"kpi":"KPI","risks":["リスク"]}}],"critical_path":"クリティカルパス","success_criteria":["成功条件"]}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の内容から実行プランを作成してください。
+適用フレームワーク: {fw_str}
+
+【内容】
+{req.input_text}
+
+【共通ルール】
+- 感想ではなく分析を返すこと
+- JSON以外の余計な文を絶対に返さないこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+【追加ルール（実行プラン）】
+- タスクは実行可能な粒度で分割すること
+- 優先度はhigh / medium / lowで分類すること
+- KPIは可能な限り数値目標を含めること
+- deadlineは相対的な目安で構わない（例: 2週間以内）
+
+以下のJSONスキーマで返してください:
+{{
+  "action_plan": [
+    {{
+      "task": "タスク名",
+      "owner": "担当者・部門",
+      "deadline": "期限の目安",
+      "kpi": "成功指標",
+      "priority": "high"
+    }}
+  ]
+}}"""
     else:
         return {"ok": False, "error": f"不明なanalysis_type: {req.analysis_type}"}
 
