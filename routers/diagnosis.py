@@ -462,11 +462,16 @@ def run_consult(req: ConsultRequest, payload: dict = Depends(verify_token)):
     try:
         import re, json as _json
         res = call_llm(
-            system_prompt="戦略コンサルタント。JSONのみ出力。余計なテキスト禁止。",
+            system_prompt="あなたは戦略コンサルタントです。必ず有効なJSONオブジェクトのみ返してください。説明文・前置き・Markdownコードブロック・余計なテキストは一切禁止です。最初の文字は必ず{で始めてください。",
             messages=[{"role":"user","content":prompt}],
             ai_tier="core", max_tokens=2048
         )
-        m = re.search(r"\{.*\}", res, re.DOTALL)
+        res_clean = res.strip()
+        if res_clean.startswith("```"):
+            import re as _re2
+            res_clean = _re2.sub(r"^```[a-z]*\n?", "", res_clean)
+            res_clean = _re2.sub(r"```$", "", res_clean).strip()
+        m = re.search(r"\{.*\}", res_clean, re.DOTALL)
         result = _json.loads(m.group(0)) if m else {"raw": res}
 
         db.collection("tenants").document(tenant_id).collection("consulting_analyses").add({
