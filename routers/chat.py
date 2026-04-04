@@ -341,14 +341,19 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
             _sp = (
                 "次のJSONキー構造のみで回答せよ。他のキー名・構造は絶対禁止。前置き禁止。コードブロック禁止。\n"
                 "必須キー: summary, cards, analysis, actions, value_message\n"
-                "cards必須キー: current, risk, plan (各3件の文字列配列)\n"
+                "cards必須キー: current, risk, plan (各5件の文字列配列・各項目は具体的数値・固有名詞・根拠を含む20字以上)\n"
                 "analysis必須キー: type, urgency, importance, mode\n"
                 "urgency/importanceは必ず '高'/'中'/'低' のいずれか\n"
                 "modeは必ず STRATEGY/NUMERIC/CONTROL/RISK/MARKETING/GROWTH/DIAGNOSIS/PLANNING/FINANCE/HR/CREATIVE/NEGOTIATION/AUTO のいずれか\n"
-                f"\n相談: {req.message[:300]}\n"
-                f"回答要約: {reply[:600]}\n"
+                "summary: 根拠・数値・結論を含む2〜3行で記述せよ\n"
+                "cards.current: 現状・事実・観測データを具体的に5件（一般論禁止・数値引用必須）\n"
+                "cards.risk: 問題・リスク・ボトルネックを因果関係付きで5件\n"
+                "cards.plan: 即実行可能な具体的施策を優先度順に5件（担当・期限・KPIを含む）\n"
+                "actions: 次に取るべき具体的アクションを3件\n"
+                f"\n相談: {req.message[:400]}\n"
+                f"回答要約: {reply[:800]}\n"
                 "\n出力例(この形式厳守):\n"
-                '{"summary":"結論を1〜2行で","cards":{"current":["現状1","現状2","現状3"],"risk":["リスク1","リスク2","リスク3"],"plan":["方針1","方針2","方針3"]},"analysis":{"type":"意思決定整理","urgency":"中","importance":"高","mode":"STRATEGY"},"actions":["アクション1","アクション2","アクション3"],"value_message":"価値を1行で"}'
+                '{"summary":"売上15%減の根本原因は新規獲得コスト増加と離脱率上昇の複合要因。即時対処が必要。","cards":{"current":["新規獲得単価が前月比23%増加し収益を圧迫","リピート率が62%→54%に低下、離脱が加速","競合A社が価格15%引下げで顧客を奪取中","SNS広告ROIが1.8→1.2に悪化、費用対効果低下","スタッフ稼働率が87%で限界近く追加施策の余力なし"],"risk":["獲得コスト増加が継続すると3ヶ月で赤字転落","リピート離脱が止まらず既存顧客基盤が崩壊リスク","競合の価格攻勢に対抗できず市場シェア喪失","現状の広告依存構造では利益率改善が不可能","スタッフ疲弊による品質低下でさらなる離脱を招く懸念"],"plan":["離脱顧客への復帰DM施策を今週中に実施（目標: 復帰率10%）","SNS広告をROI1.5以上の媒体に集中し無駄を即カット","紹介制度導入で獲得コストを現状比30%削減を目指す","リピート特典の見直しで来店頻度を月1→月1.5回に引上げ","スタッフ1名採用検討で稼働率を80%以下に正常化"]},"analysis":{"type":"構造分析","urgency":"高","importance":"高","mode":"DIAGNOSIS"},"actions":["離脱顧客リストを今週中に抽出する","SNS広告のROI計測を媒体別に即開始する","競合価格調査を実施して差別化軸を再定義する"],"value_message":"売上減の構造的原因を特定し、即実行可能な優先施策を提示。"}'
             )
             _sr = call_llm(
                 system_prompt="JSONのみ出力。指定キー構造厳守。前置き・後置き・コードブロック完全禁止。余計なキー追加禁止。",
