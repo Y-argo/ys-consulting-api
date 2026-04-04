@@ -145,6 +145,97 @@ def _save_diagnosis(uid: str, tenant_id: str, report_md: str, rank: str = None, 
     db.collection("user_diagnoses").document(doc_id).set(data)
     return doc_id
 
+def _extract_decision_metrics_from_report(report_md: str, tenant_id: str = "default") -> dict:
+    """診断レポートMDからDMスコアを抽出して返す（実際のフォーマットに対応）"""
+    import re as _re
+    text = report_md or ""
+
+    # Q: 評価ランク → decision_quality_score
+    rank_map = {"S":95,"A+":88,"A":83,"A-":78,"B+":73,"B":68,"B-":63,"C+":58,"C":53,"D":40}
+    rank_m = _re.search(r"評価ランク[:：]\s*([SABCD][+\-]?)", text)
+    rank_raw = rank_m.group(1).strip().upper() if rank_m else "C"
+    decision_quality_score = float(rank_map.get(rank_raw, 55))
+
+    # R: 優先改善度 → risk_tolerance（緊急ほど低い）
+    risk_map = {"緊急": 40, "高": 52, "中": 65, "低": 85}
+    risk_m = _re.search(r"優先改善度[:：]\s*(低|中|高|緊急)", text)
+    risk_tolerance = float(risk_map.get(risk_m.group(1) if risk_m else "中", 65))
+
+    # S: 主要課題セクションの記述量 → structural_intelligence
+    struct_m = _re.search(r"## 主要課題(.+?)(?=## |$)", text, _re.DOTALL)
+    struct_len = len((struct_m.group(1) if struct_m else "").strip())
+    structural_intelligence = 85.0 if struct_len >= 300 else 65.0 if struct_len >= 120 else 45.0
+
+    # V: 推奨行動の数 → decision_velocity
+    actions = _re.findall(r"推奨行動[:：]", text)
+    n_actions = len(actions)
+    decision_velocity = min(90.0, 50.0 + n_actions * 13.0)
+
+    # P: 強み記述の具体性 → prediction_accuracy
+    strength_m = _re.search(r"強み[:：]\s*(.+)", text)
+    strength_len = len(strength_m.group(1).strip()) if strength_m else 0
+    prediction_accuracy = 80.0 if strength_len >= 20 else 65.0 if strength_len >= 5 else 45.0
+
+    # E: 弱点記述の具体性 → execution_consistency
+    weak_m = _re.search(r"弱点[:：]\s*(.+)", text)
+    weak_len = len(weak_m.group(1).strip()) if weak_m else 0
+    execution_consistency = 75.0 if weak_len >= 20 else 60.0 if weak_len >= 5 else 45.0
+
+    # ウェイト（app.pyと同一）
+    _w_raw = {"Q": 30, "R": 20, "S": 15, "V": 15, "P": 10, "E": 10}
+    _w_sum = sum(_w_raw.values())
+    w = {k: v / _w_sum for k, v in _w_raw.items()}
+
+    diagnosis_total_score = round(
+        w["Q"] * decision_quality_score +
+        w["R"] * risk_tolerance +
+        w["S"] * structural_intelligence +
+        w["V"] * decision_velocity +
+        w["P"] * prediction_accuracy +
+        w["E"] * execution_consistency, 1
+    )
+
+    rank_thresholds = [("S",90),("A+",82),("A",78),("A-",74),("B+",70),("B",65),("B-",60),("C+",55),("C",50)]
+    diagnosis_rank = "D"
+    for rk, t in rank_thresholds:
+        if diagnosis_total_score >= t:
+            diagnosis_rank = rk
+            break
+
+    return {
+        "decision_quality_score":  decision_quality_score,
+        "risk_tolerance":          risk_tolerance,
+        "structural_intelligence": structural_intelligence,
+        "decision_velocity":       decision_velocity,
+        "prediction_accuracy":     prediction_accuracy,
+        "execution_consistency":   execution_consistency,
+        "diagnosis_total_score":   diagnosis_total_score,
+        "diagnosis_rank":          diagnosis_rank,
+    }
+
+
+def _save_decision_metrics(uid: str, metrics: dict, source_diagnosis_id: str = "") -> None:
+    """decision_metrics/{uid}/records に保存する"""
+    db = get_db()
+    try:
+        col = db.collection("decision_metrics").document(uid).collection("records")
+        col.add({
+            "user_id":                 uid,
+            "created_at":              fs.SERVER_TIMESTAMP,
+            "decision_quality_score":  float(metrics.get("decision_quality_score", 60)),
+            "risk_tolerance":          float(metrics.get("risk_tolerance", 65)),
+            "decision_velocity":       float(metrics.get("decision_velocity", 70)),
+            "structural_intelligence": float(metrics.get("structural_intelligence", 65)),
+            "prediction_accuracy":     float(metrics.get("prediction_accuracy", 65)),
+            "execution_consistency":   float(metrics.get("execution_consistency", 65)),
+            "diagnosis_total_score":   float(metrics.get("diagnosis_total_score", 0)),
+            "diagnosis_rank":          str(metrics.get("diagnosis_rank", "C")),
+            "source_diagnosis_id":     str(source_diagnosis_id),
+        })
+    except Exception as e:
+        print(f"[SAVE_DM_ERROR] {e}", flush=True)
+
+
 def _load_diagnoses(uid: str, tenant_id: str, limit: int = 5) -> list:
     db = get_db()
     try:
@@ -194,6 +285,14 @@ def generate_diagnosis(req: DiagnosisRequest, payload: dict = Depends(verify_tok
     except Exception:
         _rank = None
     doc_id = _save_diagnosis(uid, tenant_id, report_md, rank=_rank, n_chats=req.n_chats)
+
+    # DMスコア計算・保存
+    try:
+        dm_metrics = _extract_decision_metrics_from_report(report_md, tenant_id)
+        _save_decision_metrics(uid, dm_metrics, doc_id)
+    except Exception as _dme:
+        print(f"[DM_ERROR] {_dme}", flush=True)
+
     return {"doc_id": doc_id, "report_md": report_md}
 
 @router.get("/list")

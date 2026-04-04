@@ -80,10 +80,12 @@ def get_user_stats(payload: dict = Depends(verify_token)):
     try:
         docs = list(
             db.collection("decision_metrics").document(uid).collection("records")
-            .order_by("created_at", direction=fs.Query.DESCENDING).limit(1).stream()
+            .limit(20).stream()
         )
         if docs:
-            dm = docs[0].to_dict() or {}
+            docs_list = [d.to_dict() or {} for d in docs]
+            docs_list.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
+            dm = docs_list[0]
     except Exception:
         pass
     use_count = int(d.get("use_count_since_report", 0))
