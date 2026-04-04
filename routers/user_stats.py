@@ -76,16 +76,66 @@ def get_user_stats(payload: dict = Depends(verify_token)):
     cfg = _load_rank_config(tenant_id)
     rank_name = _score_to_rank(level_score, cfg)
     next_pt = _rank_next_pt(rank_name, level_score, cfg)
+    # DMスコアをチャット利用データからリアルタイム計算
     dm = None
     try:
-        docs = list(
-            db.collection("decision_metrics").document(uid).collection("records")
-            .limit(20).stream()
-        )
-        if docs:
-            docs_list = [d.to_dict() or {} for d in docs]
-            docs_list.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
-            dm = docs_list[0]
+        _DEFAULT_WEIGHTS = {"Q": 30, "R": 20, "S": 15, "V": 15, "P": 10, "E": 10}
+        _w = {k: float(v) / 100.0 for k, v in _DEFAULT_WEIGHTS.items()}
+
+        _logs_raw = list(db.collection("usage_logs").where("user_id","==",uid).limit(200).stream())
+        _logs = [l for l in _logs_raw if not (l.to_dict() or {}).get("is_admin_test")][:60]
+        turn_count = len(_logs)
+        avg_prompt_len = 0.0
+        session_count = 0
+        unique_keywords = 0
+        if _logs:
+            _prompts = []
+            _dates = set()
+            for _l in _logs:
+                _d = _l.to_dict() or {}
+                _p = str(_d.get("prompt","")).strip()
+                if _p: _prompts.append(_p)
+                _ts = _d.get("timestamp")
+                if _ts and hasattr(_ts,"strftime"): _dates.add(_ts.strftime("%Y-%m-%d"))
+            if _prompts:
+                avg_prompt_len = sum(len(p) for p in _prompts) / len(_prompts)
+                unique_keywords = len(set(" ".join(_prompts).split()))
+            session_count = len(_dates)
+
+        # Q: level_score基準
+        if level_score >= 451:   dq = 90.0
+        elif level_score >= 201: dq = 75.0 + (level_score-201)/250*15.0
+        elif level_score >= 81:  dq = 60.0 + (level_score-81)/120*15.0
+        else:                    dq = 50.0 + level_score/80*10.0
+        dq = round(min(dq, 95.0), 1)
+        # R: 語彙多様性
+        rt = 85.0 if unique_keywords>=200 else 65.0 if unique_keywords>=80 else 55.0 if unique_keywords>=20 else 45.0
+        # S: 平均プロンプト長
+        si = 85.0 if avg_prompt_len>=150 else 65.0 if avg_prompt_len>=60 else 55.0 if avg_prompt_len>=20 else 45.0
+        # V: ターン数
+        dv = 85.0 if turn_count>=36 else 70.0 if turn_count>=18 else 60.0 if turn_count>=6 else 50.0
+        # P: セッション日数
+        pa = 85.0 if session_count>=10 else 70.0 if session_count>=4 else 60.0 if session_count>=2 else 50.0
+        # E: 利用密度
+        _e_raw = min(turn_count * avg_prompt_len / 1000.0, 100.0)
+        ec = 85.0 if _e_raw>=15 else 70.0 if _e_raw>=5 else 55.0 if _e_raw>=1 else 45.0
+
+        total = round(_w["Q"]*dq + _w["R"]*rt + _w["S"]*si + _w["V"]*dv + _w["P"]*pa + _w["E"]*ec, 1)
+        rank_th = [("S",90),("A+",82),("A",78),("A-",74),("B+",70),("B",65),("B-",60),("C+",55),("C",50)]
+        dr = "D"
+        for _rk, _t in rank_th:
+            if total >= _t: dr = _rk; break
+
+        dm = {
+            "decision_quality_score":  dq,
+            "risk_tolerance":          rt,
+            "structural_intelligence": si,
+            "decision_velocity":       dv,
+            "prediction_accuracy":     pa,
+            "execution_consistency":   ec,
+            "diagnosis_total_score":   total,
+            "diagnosis_rank":          dr,
+        }
     except Exception:
         pass
     use_count = int(d.get("use_count_since_report", 0))

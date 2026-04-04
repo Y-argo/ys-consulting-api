@@ -145,97 +145,6 @@ def _save_diagnosis(uid: str, tenant_id: str, report_md: str, rank: str = None, 
     db.collection("user_diagnoses").document(doc_id).set(data)
     return doc_id
 
-def _extract_decision_metrics_from_report(report_md: str, tenant_id: str = "default") -> dict:
-    """診断レポートMDからDMスコアを抽出して返す（実際のフォーマットに対応）"""
-    import re as _re
-    text = report_md or ""
-
-    # Q: 評価ランク → decision_quality_score
-    rank_map = {"S":95,"A+":88,"A":83,"A-":78,"B+":73,"B":68,"B-":63,"C+":58,"C":53,"D":40}
-    rank_m = _re.search(r"評価ランク[:：]\s*([SABCD][+\-]?)", text)
-    rank_raw = rank_m.group(1).strip().upper() if rank_m else "C"
-    decision_quality_score = float(rank_map.get(rank_raw, 55))
-
-    # R: 優先改善度 → risk_tolerance（緊急ほど低い）
-    risk_map = {"緊急": 40, "高": 52, "中": 65, "低": 85}
-    risk_m = _re.search(r"優先改善度[:：]\s*(低|中|高|緊急)", text)
-    risk_tolerance = float(risk_map.get(risk_m.group(1) if risk_m else "中", 65))
-
-    # S: 主要課題セクションの記述量 → structural_intelligence
-    struct_m = _re.search(r"## 主要課題(.+?)(?=## |$)", text, _re.DOTALL)
-    struct_len = len((struct_m.group(1) if struct_m else "").strip())
-    structural_intelligence = 85.0 if struct_len >= 300 else 65.0 if struct_len >= 120 else 45.0
-
-    # V: 推奨行動の数 → decision_velocity
-    actions = _re.findall(r"推奨行動[:：]", text)
-    n_actions = len(actions)
-    decision_velocity = min(90.0, 50.0 + n_actions * 13.0)
-
-    # P: 強み記述の具体性 → prediction_accuracy
-    strength_m = _re.search(r"強み[:：]\s*(.+)", text)
-    strength_len = len(strength_m.group(1).strip()) if strength_m else 0
-    prediction_accuracy = 80.0 if strength_len >= 20 else 65.0 if strength_len >= 5 else 45.0
-
-    # E: 弱点記述の具体性 → execution_consistency
-    weak_m = _re.search(r"弱点[:：]\s*(.+)", text)
-    weak_len = len(weak_m.group(1).strip()) if weak_m else 0
-    execution_consistency = 75.0 if weak_len >= 20 else 60.0 if weak_len >= 5 else 45.0
-
-    # ウェイト（app.pyと同一）
-    _w_raw = {"Q": 30, "R": 20, "S": 15, "V": 15, "P": 10, "E": 10}
-    _w_sum = sum(_w_raw.values())
-    w = {k: v / _w_sum for k, v in _w_raw.items()}
-
-    diagnosis_total_score = round(
-        w["Q"] * decision_quality_score +
-        w["R"] * risk_tolerance +
-        w["S"] * structural_intelligence +
-        w["V"] * decision_velocity +
-        w["P"] * prediction_accuracy +
-        w["E"] * execution_consistency, 1
-    )
-
-    rank_thresholds = [("S",90),("A+",82),("A",78),("A-",74),("B+",70),("B",65),("B-",60),("C+",55),("C",50)]
-    diagnosis_rank = "D"
-    for rk, t in rank_thresholds:
-        if diagnosis_total_score >= t:
-            diagnosis_rank = rk
-            break
-
-    return {
-        "decision_quality_score":  decision_quality_score,
-        "risk_tolerance":          risk_tolerance,
-        "structural_intelligence": structural_intelligence,
-        "decision_velocity":       decision_velocity,
-        "prediction_accuracy":     prediction_accuracy,
-        "execution_consistency":   execution_consistency,
-        "diagnosis_total_score":   diagnosis_total_score,
-        "diagnosis_rank":          diagnosis_rank,
-    }
-
-
-def _save_decision_metrics(uid: str, metrics: dict, source_diagnosis_id: str = "") -> None:
-    """decision_metrics/{uid}/records に保存する"""
-    db = get_db()
-    try:
-        col = db.collection("decision_metrics").document(uid).collection("records")
-        col.add({
-            "user_id":                 uid,
-            "created_at":              fs.SERVER_TIMESTAMP,
-            "decision_quality_score":  float(metrics.get("decision_quality_score", 60)),
-            "risk_tolerance":          float(metrics.get("risk_tolerance", 65)),
-            "decision_velocity":       float(metrics.get("decision_velocity", 70)),
-            "structural_intelligence": float(metrics.get("structural_intelligence", 65)),
-            "prediction_accuracy":     float(metrics.get("prediction_accuracy", 65)),
-            "execution_consistency":   float(metrics.get("execution_consistency", 65)),
-            "diagnosis_total_score":   float(metrics.get("diagnosis_total_score", 0)),
-            "diagnosis_rank":          str(metrics.get("diagnosis_rank", "C")),
-            "source_diagnosis_id":     str(source_diagnosis_id),
-        })
-    except Exception as e:
-        print(f"[SAVE_DM_ERROR] {e}", flush=True)
-
-
 def _load_diagnoses(uid: str, tenant_id: str, limit: int = 5) -> list:
     db = get_db()
     try:
@@ -285,14 +194,6 @@ def generate_diagnosis(req: DiagnosisRequest, payload: dict = Depends(verify_tok
     except Exception:
         _rank = None
     doc_id = _save_diagnosis(uid, tenant_id, report_md, rank=_rank, n_chats=req.n_chats)
-
-    # DMスコア計算・保存
-    try:
-        dm_metrics = _extract_decision_metrics_from_report(report_md, tenant_id)
-        _save_decision_metrics(uid, dm_metrics, doc_id)
-    except Exception as _dme:
-        print(f"[DM_ERROR] {_dme}", flush=True)
-
     return {"doc_id": doc_id, "report_md": report_md}
 
 @router.get("/list")
@@ -398,163 +299,35 @@ def run_consult(req: ConsultRequest, payload: dict = Depends(verify_token)):
     fw_str = "、".join(frameworks[:5]) if frameworks else "MECE・SWOT・3C・ロジックツリー・Issue Tree"
 
     if req.analysis_type == "structure":
-        prompt = f"""あなたは戦略コンサルタントです。以下の相談内容を構造診断してください。
-適用フレームワーク: {fw_str}
-
-【相談内容】
-{req.input_text}
-
-【補足情報】
-{req.supplement or "（なし）"}
-
-【共通ルール】
-- 感想ではなく分析を返すこと
-- 抽象語だけで逃げないこと
-- 不明点はmissing_informationに格納すること
-- 推測は推測として扱うこと
-- JSON以外の余計な文を絶対に返さないこと
-- 目的と手段を混同しないこと
-- 出力は必ず有効なJSONオブジェクトのみとすること
-
-【追加ルール（構造診断）】
-- 現象・表層原因・根因を必ず分離すること
-- 制約条件を必ず抽出すること
-- 打ち手は優先順位順に返すこと
-
-以下のJSONスキーマで返してください:
-{{
-  "issue_summary": "問題の要約（1〜2文）",
-  "observations": ["観測事実1", "観測事実2"],
-  "surface_causes": ["表層原因1", "表層原因2"],
-  "root_causes": ["根因1", "根因2"],
-  "constraints": ["制約1", "制約2"],
-  "priority_points": ["優先論点1", "優先論点2"],
-  "recommended_actions": ["打ち手1（優先度高）", "打ち手2", "打ち手3"],
-  "risks": ["リスク1", "リスク2"],
-  "missing_information": ["不足情報1", "不足情報2"]
-}}"""
+        prompt = f"""以下の入力を構造診断せよ。JSONで返せ。
+入力: {req.input_text}
+補足: {req.supplement}
+フレームワーク候補: {fw_str}
+出力形式: {{"summary":"全体要約","structure_layers":[{{"layer":"層名","content":"内容","strength":0.8}}],"key_bottleneck":"主要ボトルネック","recommended_framework":"推奨フレームワーク","next_actions":["アクション1"]}}"""
 
     elif req.analysis_type == "issue":
-        prompt = f"""あなたは戦略コンサルタントです。以下の内容から論点・仮説を設計してください。
-適用フレームワーク: {fw_str}
-
-【入力内容】
-{req.input_text}
-
-【共通ルール】
-- 感想ではなく分析を返すこと
-- 抽象語だけで逃げないこと
-- 不明点はmissing_informationに格納すること
-- JSON以外の余計な文を絶対に返さないこと
-- 出力は必ず有効なJSONオブジェクトのみとすること
-
-以下のJSONスキーマで返してください:
-{{
-  "main_issues": ["主要論点1", "主要論点2"],
-  "hypotheses": ["仮説1", "仮説2"],
-  "questions_to_verify": ["次に確認すべき質問1", "質問2"],
-  "required_data": ["必要なデータ1", "データ2"],
-  "decision_points": ["意思決定ポイント1", "ポイント2"]
-}}"""
+        prompt = f"""以下の状況から課題仮説を生成せよ。JSONで返せ。
+入力: {req.input_text}
+フレームワーク: {fw_str}
+出力形式: {{"hypotheses":[{{"hypothesis":"仮説","priority":"high/mid/low","evidence":"根拠","verification":"検証方法"}}],"root_cause":"根本原因","quick_wins":["即効策"]}}"""
 
     elif req.analysis_type == "comparison":
-        prompt = f"""あなたは戦略コンサルタントです。以下の複数案を比較分析してください。
-
-【比較対象案】
-{req.options or req.input_text}
-
-【追加コンテキスト】
-{req.supplement or "（なし）"}
-
-【共通ルール】
-- 感想ではなく分析を返すこと
-- JSON以外の余計な文を絶対に返さないこと
-- 出力は必ず有効なJSONオブジェクトのみとすること
-
-【追加ルール（比較表）】
-- すべて同じ比較軸で比較すること
-- 感覚論ではなく軸差で比較すること
-- スコアは1〜5の整数で評価すること（5が最良）
-- 最終推奨案を1つ返すこと
-
-以下のJSONスキーマで返してください:
-{{
-  "comparison_axes": ["収益性", "実行難易度", "初期コスト", "回収期間", "リスク"],
-  "options": [
-    {{
-      "name": "案の名前",
-      "scores": {{"収益性": 0, "実行難易度": 0, "初期コスト": 0, "回収期間": 0, "リスク": 0}},
-      "pros": ["長所1", "長所2"],
-      "cons": ["短所1", "短所2"],
-      "recommended_for": ["この案が向いているケース"]
-    }}
-  ],
-  "final_recommendation": "最終推奨案と理由"
-}}"""
+        prompt = f"""以下の選択肢を多軸比較せよ。JSONで返せ。
+選択肢: {req.options or req.input_text}
+評価軸: コスト・リスク・効果・実現性・速度
+出力形式: {{"options":[{{"name":"選択肢名","scores":{{"cost":80,"risk":60,"effect":90,"feasibility":70,"speed":75}},"summary":"評価コメント"}}],"recommendation":"推奨選択肢","rationale":"理由"}}"""
 
     elif req.analysis_type == "contradiction":
-        prompt = f"""あなたは戦略コンサルタントです。以下の内容から矛盾・齟齬を検出してください。
-
-【戦略文】
-{req.strategy or req.input_text}
-
-【方針文】
-{req.policy or req.supplement or "（なし）"}
-
-【共通ルール】
-- 感想ではなく分析を返すこと
-- JSON以外の余計な文を絶対に返さないこと
-- 出力は必ず有効なJSONオブジェクトのみとすること
-
-【追加ルール（矛盾検出）】
-- 目的と手段の衝突を優先検出すること
-- KPIと戦略のズレも検出対象とすること
-- 矛盾がなければcontradictionsを空配列にすること
-
-以下のJSONスキーマで返してください:
-{{
-  "contradictions": [
-    {{
-      "type": "矛盾の種類（例: 目的手段衝突、KPIズレ、前提矛盾）",
-      "description": "矛盾の具体的な説明",
-      "why_problematic": "なぜ問題か",
-      "fix_direction": "修正方向"
-    }}
-  ],
-  "consistency_score": 70,
-  "overall_assessment": "総合評価"
-}}"""
+        prompt = f"""以下の戦略と方針の矛盾を検知せよ。JSONで返せ。
+戦略: {req.strategy or req.input_text}
+方針: {req.policy or req.supplement}
+出力形式: {{"contradictions":[{{"point":"矛盾点","severity":"high/mid/low","resolution":"解決策"}}],"consistency_score":70,"overall_assessment":"総合評価"}}"""
 
     elif req.analysis_type == "execution":
-        prompt = f"""あなたは戦略コンサルタントです。以下の内容から実行プランを作成してください。
-適用フレームワーク: {fw_str}
-
-【内容】
-{req.input_text}
-
-【共通ルール】
-- 感想ではなく分析を返すこと
-- JSON以外の余計な文を絶対に返さないこと
-- 出力は必ず有効なJSONオブジェクトのみとすること
-
-【追加ルール（実行プラン）】
-- タスクは実行可能な粒度で分割すること
-- 優先度はhigh / medium / lowで分類すること
-- KPIは可能な限り数値目標を含めること
-- deadlineは相対的な目安で構わない（例: 2週間以内）
-
-以下のJSONスキーマで返してください:
-{{
-  "action_plan": [
-    {{
-      "task": "タスク名",
-      "owner": "担当者・部門",
-      "deadline": "期限の目安",
-      "kpi": "成功指標",
-      "priority": "high"
-    }}
-  ]
-}}"""
+        prompt = f"""以下の目標に対する実行計画を生成せよ。JSONで返せ。
+目標・背景: {req.input_text}
+フレームワーク: {fw_str}
+出力形式: {{"phases":[{{"phase":"フェーズ名","duration":"期間","actions":["アクション"],"kpi":"KPI","risks":["リスク"]}}],"critical_path":"クリティカルパス","success_criteria":["成功条件"]}}"""
     else:
         return {"ok": False, "error": f"不明なanalysis_type: {req.analysis_type}"}
 
