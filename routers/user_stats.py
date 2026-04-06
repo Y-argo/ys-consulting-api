@@ -1022,3 +1022,31 @@ def system_health(payload: dict = Depends(verify_token)):
     except Exception as e:
         result["users"] = f"NG: {e}"
     return result
+
+@router.get("/custom_prompt")
+def get_custom_prompt(payload: dict = Depends(verify_token)):
+    uid = payload["uid"]
+    db = get_db()
+    try:
+        doc = db.collection("users").document(uid).get()
+        d = doc.to_dict() or {} if doc.exists else {}
+        return {
+            "custom_sys_prompt": d.get("custom_sys_prompt", ""),
+            "custom_prompt_mode": d.get("custom_prompt_mode", "append"),
+            "has_custom": bool(d.get("custom_sys_prompt", "")),
+        }
+    except Exception as e:
+        return {"custom_sys_prompt": "", "custom_prompt_mode": "append", "has_custom": False}
+
+@router.post("/custom_prompt")
+def save_custom_prompt(body: dict = Body(...), payload: dict = Depends(verify_token)):
+    uid = payload["uid"]
+    db = get_db()
+    try:
+        db.collection("users").document(uid).set({
+            "custom_sys_prompt": body.get("custom_sys_prompt", ""),
+            "custom_prompt_mode": body.get("custom_prompt_mode", "append"),
+        }, merge=True)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

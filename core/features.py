@@ -39,6 +39,11 @@ FEATURE_REGISTRY = {
         "category": "AIエンジン",
         "default_enabled": False,
     },
+    "image_gallery": {
+        "label": "生成画像ギャラリー",
+        "category": "ギャラリー",
+        "default_enabled": False,
+    },
     "diag_structure": {
         "label": "構造診断タブ",
         "category": "診断タブ",

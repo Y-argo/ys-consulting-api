@@ -137,7 +137,7 @@ def _update_level_score(tenant_id: str, uid: str, delta: int):
     except Exception:
         pass
 
-def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: str, cases: list = None, structured: dict = None):
+def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: str, cases: list = None, structured: dict = None, images: list = None):
     ref = _messages_ref(tenant_id, uid, chat_id)
     doc = {
         "role":    role,
@@ -148,6 +148,8 @@ def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: st
         doc["cases"] = cases
     if structured:
         doc["structured"] = structured
+    if images:
+        doc["images"] = [{"mime_type": img.get("mime_type","image/png"), "gcs_url": img.get("gcs_url","")} for img in images if img.get("gcs_url")]
     ref.add(doc)
 
 def _load_history(tenant_id: str, uid: str, chat_id: str = "main", limit: int = 20) -> List[dict]:
@@ -161,6 +163,8 @@ def _load_history(tenant_id: str, uid: str, chat_id: str = "main", limit: int = 
             msg["cases"] = data["cases"]
         if data.get("structured"):
             msg["structured"] = data["structured"]
+        if data.get("images"):
+            msg["images"] = data["images"]
         result.append(msg)
     return result
 
@@ -401,7 +405,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         pass
 
     _save_message(tenant_id, uid, chat_id, "user", req.message)
-    _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured)
+    # assistant save_message はGCS保存後に実行
 
     # GCS画像保存
     gcs_image_urls = []
@@ -427,7 +431,26 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
                         pass
         except Exception:
             pass
+    # GCS保存結果に関わらずFirestoreに画像記録
+    print(f"[GALLERY_DEBUG] generated_images count: {len(generated_images)}", flush=True)
+    _db_g = get_db()
+    for _img in generated_images:
+        try:
+            _img_id = uuid.uuid4().hex
+            _save_url = _img.get("gcs_url","")
+            _db_g.collection("image_gallery").document(uid).collection("images").document(_img_id).set({
+                "image_id": _img_id,
+                "uid": uid,
+                "tenant_id": tenant_id,
+                "gcs_url": _save_url,
+                "mime_type": _img.get("mime_type","image/png"),
+                "prompt": req.message[:500],
+                "created_at": __import__("datetime").datetime.utcnow().isoformat(),
+            })
+        except Exception:
+            pass
 
+    _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured, images=generated_images)
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=cases, images=generated_images, structured=structured)
 
 @router.get("/history/{chat_id}")
@@ -915,8 +938,24 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
                         pass
         except Exception:
             pass
+    # Firestoreに画像記録
+    _db_si = get_db()
+    for _img in generated_images:
+        try:
+            _img_id = uuid.uuid4().hex
+            _db_si.collection("image_gallery").document(uid).collection("images").document(_img_id).set({
+                "image_id": _img_id,
+                "uid": uid,
+                "tenant_id": tenant_id,
+                "gcs_url": _img.get("gcs_url",""),
+                "mime_type": _img.get("mime_type","image/png"),
+                "prompt": (req.message or "")[:500],
+                "created_at": __import__("datetime").datetime.utcnow().isoformat(),
+            })
+        except Exception:
+            pass
     _save_message(tenant_id, uid, chat_id, "user", req.message)
-    _save_message(tenant_id, uid, chat_id, "assistant", reply)
+    _save_message(tenant_id, uid, chat_id, "assistant", reply, images=generated_images)
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=generated_images)
 
 
@@ -1035,3 +1074,36 @@ def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
     _save_message(tenant_id, uid, chat_id, "user", req.message)
     _save_message(tenant_id, uid, chat_id, "assistant", reply)
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[])
+
+
+@router.get("/images")
+def get_image_gallery(payload: dict = Depends(verify_token)):
+    """生成画像ギャラリー一覧取得"""
+    from api.core.features import is_feature_enabled
+    uid = payload["uid"]
+    tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+    db = get_db()
+    try:
+        docs = list(
+            db.collection("image_gallery").document(uid).collection("images")
+            .limit(100).stream()
+        )
+        images = [d.to_dict() for d in docs]
+        images.sort(key=lambda x: str(x.get("created_at","")), reverse=True)
+        return {"images": images}
+    except Exception as e:
+        return {"images": [], "error": str(e)}
+
+
+@router.delete("/images/{image_id}")
+def delete_image(image_id: str, payload: dict = Depends(verify_token)):
+    """生成画像を削除"""
+    from api.core.features import is_feature_enabled
+    uid = payload["uid"]
+    db = get_db()
+    try:
+        # Firestoreから削除
+        db.collection("image_gallery").document(uid).collection("images").document(image_id).delete()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
