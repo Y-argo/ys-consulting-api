@@ -212,15 +212,20 @@ def get_thought_map(payload: dict = Depends(verify_token)):
         sessions_raw = [s for s in all_sessions if f"__{uid}__" in s.id]
         sessions_raw.sort(key=lambda s: str((s.to_dict() or {}).get("updated_at","")), reverse=True)
 
-        # トピック分類キーワード
         TOPICS = {
-            "戦略・競合": ["戦略","競合","差別化","ポジション","市場","シェア","ブランド"],
-            "集客・SNS": ["集客","SNS","Instagram","Twitter","広告","フォロワー","投稿"],
-            "売上・財務": ["売上","収益","利益","資金","コスト","価格","単価"],
-            "組織・人材": ["採用","チーム","組織","スタッフ","教育","マネジメント"],
-            "投資・株": ["投資","株","銘柄","シグナル","相場","資産","ポートフォリオ"],
-            "診断・分析": ["診断","分析","レポート","スコア","評価","課題"],
-            "指名・接客": ["指名","接客","お客様","キャスト","リピート","コミュニケーション"],
+            "戦略・競合":   ["戦略","競合","差別化","ポジション","市場","シェア","ブランド","参入","撤退","優位"],
+            "集客・SNS":   ["集客","SNS","Instagram","Twitter","広告","フォロワー","投稿","認知","バズ","LP"],
+            "売上・財務":   ["売上","収益","利益","資金","コスト","価格","単価","資産","融資","キャッシュ"],
+            "組織・人材":   ["採用","チーム","組織","スタッフ","教育","マネジメント","育成","離職","評価"],
+            "投資・株":     ["投資","株","銘柄","シグナル","相場","資産","ポートフォリオ","底打ち","売り"],
+            "診断・分析":   ["診断","分析","レポート","スコア","評価","課題","ボトルネック","原因"],
+            "指名・接客":   ["指名","接客","お客様","キャスト","リピート","コミュニケーション"],
+            "マーケ・集客": ["マーケ","宣材","写真","予約","ネット予約","口コミ","レビュー","集患"],
+            "計画・実行":   ["計画","ロードマップ","スケジュール","手順","ステップ","期限","タスク"],
+            "リスク・危機": ["リスク","危機","失敗","損失","トラブル","クレーム","炎上","最悪"],
+            "成長・習慣":   ["成長","スキル","習慣","訓練","学習","キャリア","目標","継続"],
+            "交渉・説得":   ["交渉","説得","条件","合意","契約","提案","伝え方","折衝"],
+            "思考・構造":   ["構造","フレームワーク","ロジック","仮説","論点","因果","MECE"],
         }
 
         def classify(text):
@@ -229,50 +234,105 @@ def get_thought_map(payload: dict = Depends(verify_token)):
                     return topic
             return "その他"
 
-        # ノード収集
+        theme_count = {}
+        theme_sessions = {}
+        all_prompts = []
         raw_nodes = []
         node_set = set()
-        for s in sessions_raw[:15]:
+
+        for s in sessions_raw[:20]:
             try:
+                s_data = s.to_dict() or {}
+                s_date = str(s_data.get("updated_at",""))[:10]
                 msgs = list(db.collection("chat_sessions").document(s.id).collection("messages").limit(40).stream())
                 msgs.sort(key=lambda m: str((m.to_dict() or {}).get("ts","")))
                 for m in msgs:
                     d = m.to_dict() or {}
                     if d.get("role") == "user":
-                        content = (d.get("content","") or "")[:35]
-                        if content and content not in node_set and len(content) > 3:
-                            node_set.add(content)
-                            topic = classify(content)
-                            raw_nodes.append({"id": content, "label": content, "group": topic})
+                        content = (d.get("content","") or "").strip()
+                        if not content or len(content) <= 3: continue
+                        all_prompts.append(content)
+                        topic = classify(content)
+                        theme_count[topic] = theme_count.get(topic, 0) + 1
+                        if topic not in theme_sessions:
+                            theme_sessions[topic] = []
+                        if s_date not in theme_sessions[topic]:
+                            theme_sessions[topic].append(s_date)
+                        label = content[:35]
+                        if label not in node_set:
+                            node_set.add(label)
+                            raw_nodes.append({"id": label, "label": label, "group": topic, "full_text": content[:200]})
             except Exception:
                 continue
 
-        raw_nodes = raw_nodes[:30]
+        raw_nodes = raw_nodes[:40]
 
-        # トピック間のエッジ（同トピック内で繋ぐ）
-        edges = []
+        unresolved_alerts = [
+            {"topic": t, "count": c, "message": f"「{t}」に関する相談が{c}回繰り返されています。根本解決が必要な可能性があります。"}
+            for t, c in theme_count.items() if c >= 3 and t != "その他"
+        ]
+        unresolved_alerts.sort(key=lambda x: x["count"], reverse=True)
+
+        growth_trend = [
+            {"topic": t, "session_count": len(dates), "last_date": max(dates) if dates else ""}
+            for t, dates in theme_sessions.items() if t != "その他"
+        ]
+        growth_trend.sort(key=lambda x: x["session_count"], reverse=True)
+
         topic_last = {}
+        edges = []
         for n in raw_nodes:
             g = n["group"]
             if g in topic_last:
                 edges.append({"from": topic_last[g], "to": n["id"], "topic": g})
             topic_last[g] = n["id"]
 
-        # トピック中心ノードを追加
         topics_used = list(set(n["group"] for n in raw_nodes))
         center_nodes = [{"id": f"__topic_{t}__", "label": t, "group": t, "is_center": True} for t in topics_used]
-
-        # 各ノードをトピック中心に繋ぐ
         center_edges = [{"from": f"__topic_{n['group']}__", "to": n["id"], "topic": n["group"]} for n in raw_nodes]
-
         all_nodes = center_nodes + raw_nodes
         all_edges = center_edges
 
-        return {"nodes": all_nodes, "edges": all_edges, "topics": topics_used}
+        issue_tree = {}
+        try:
+            if all_prompts:
+                from api.core.llm_client import call_llm as _cllm
+                import json as _json, re as _re
+                _sample = "\n".join(all_prompts[:30])[:3000]
+                _tree_prompt = f"""以下はユーザーの直近チャット相談内容です。コンサルタントとして課題構造を分析せよ。JSONのみ出力。
+
+{_sample}
+
+以下のJSONスキーマで返せ:
+{{
+  "root_issues": ["根本課題1", "根本課題2"],
+  "surface_issues": ["表面的課題1", "表面的課題2", "表面的課題3"],
+  "recurring_patterns": ["繰り返しパターン1", "繰り返しパターン2"],
+  "growth_opportunities": ["成長機会1", "成長機会2"],
+  "priority_action": "最優先で取り組むべきこと（1文）"
+}}"""
+                _raw = _cllm(
+                    system_prompt="戦略コンサルタント。JSONのみ出力。",
+                    messages=[{"role":"user","content":_tree_prompt}],
+                    ai_tier="core", max_tokens=1024
+                )
+                _m = _re.search(r"\{.*\}", _raw, _re.DOTALL)
+                if _m:
+                    issue_tree = _json.loads(_m.group(0))
+        except Exception:
+            pass
+
+        return {
+            "nodes": all_nodes,
+            "edges": all_edges,
+            "topics": topics_used,
+            "unresolved_alerts": unresolved_alerts[:5],
+            "growth_trend": growth_trend[:8],
+            "issue_tree": issue_tree,
+            "theme_count": theme_count,
+        }
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
-
-from fastapi import Body as _Body
 
 class ConsultRequest(BaseModel):
     analysis_type: str
@@ -299,35 +359,138 @@ def run_consult(req: ConsultRequest, payload: dict = Depends(verify_token)):
     fw_str = "、".join(frameworks[:5]) if frameworks else "MECE・SWOT・3C・ロジックツリー・Issue Tree"
 
     if req.analysis_type == "structure":
-        prompt = f"""以下の入力を構造診断せよ。JSONで返せ。
-入力: {req.input_text}
-補足: {req.supplement}
-フレームワーク候補: {fw_str}
-出力形式: {{"summary":"全体要約","structure_layers":[{{"layer":"層名","content":"内容","strength":0.8}}],"key_bottleneck":"主要ボトルネック","recommended_framework":"推奨フレームワーク","next_actions":["アクション1"]}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の相談内容を構造診断してください。
+適用フレームワーク: {fw_str}
+
+【相談内容】
+{req.input_text}
+
+【補足情報】
+{req.supplement or "（なし）"}
+
+【共通ルール】
+- 感想ではなく分析を返すこと
+- 抽象語だけで逃げないこと
+- 不明点はmissing_informationに格納すること
+- JSON以外の余計な文を絶対に返さないこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+以下のJSONスキーマで返してください:
+{{
+  "issue_summary": "問題の要約（1〜2文）",
+  "observations": ["観測事実1", "観測事実2"],
+  "surface_causes": ["表層原因1", "表層原因2"],
+  "root_causes": ["根因1", "根因2"],
+  "constraints": ["制約1", "制約2"],
+  "priority_points": ["優先論点1", "優先論点2"],
+  "recommended_actions": ["打ち手1（優先度高）", "打ち手2", "打ち手3"],
+  "risks": ["リスク1", "リスク2"],
+  "missing_information": ["不足情報1", "不足情報2"]
+}}"""
 
     elif req.analysis_type == "issue":
-        prompt = f"""以下の状況から課題仮説を生成せよ。JSONで返せ。
-入力: {req.input_text}
-フレームワーク: {fw_str}
-出力形式: {{"hypotheses":[{{"hypothesis":"仮説","priority":"high/mid/low","evidence":"根拠","verification":"検証方法"}}],"root_cause":"根本原因","quick_wins":["即効策"]}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の内容から論点・仮説を設計してください。
+適用フレームワーク: {fw_str}
+
+【入力内容】
+{req.input_text}
+
+【共通ルール】
+- 感想ではなく分析を返すこと
+- JSON以外の余計な文を絶対に返さないこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+以下のJSONスキーマで返してください:
+{{
+  "main_issues": ["主要論点1", "主要論点2"],
+  "hypotheses": ["仮説1", "仮説2"],
+  "questions_to_verify": ["次に確認すべき質問1", "質問2"],
+  "required_data": ["必要なデータ1", "データ2"],
+  "decision_points": ["意思決定ポイント1", "ポイント2"]
+}}"""
 
     elif req.analysis_type == "comparison":
-        prompt = f"""以下の選択肢を多軸比較せよ。JSONで返せ。
-選択肢: {req.options or req.input_text}
-評価軸: コスト・リスク・効果・実現性・速度
-出力形式: {{"options":[{{"name":"選択肢名","scores":{{"cost":80,"risk":60,"effect":90,"feasibility":70,"speed":75}},"summary":"評価コメント"}}],"recommendation":"推奨選択肢","rationale":"理由"}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の複数案を比較分析してください。
+
+【比較対象案】
+{req.options or req.input_text}
+
+【追加コンテキスト】
+{req.supplement or "（なし）"}
+
+【共通ルール】
+- JSON以外の余計な文を絶対に返さないこと
+- スコアは1〜5の整数で評価すること（5が最良）
+- 最終推奨案を1つ返すこと
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+以下のJSONスキーマで返してください:
+{{
+  "comparison_axes": ["収益性", "実行難易度", "初期コスト", "回収期間", "リスク"],
+  "options": [
+    {{
+      "name": "案の名前",
+      "scores": {{"収益性": 0, "実行難易度": 0, "初期コスト": 0, "回収期間": 0, "リスク": 0}},
+      "pros": ["長所1", "長所2"],
+      "cons": ["短所1", "短所2"],
+      "recommended_for": ["この案が向いているケース"]
+    }}
+  ],
+  "final_recommendation": "最終推奨案と理由"
+}}"""
 
     elif req.analysis_type == "contradiction":
-        prompt = f"""以下の戦略と方針の矛盾を検知せよ。JSONで返せ。
-戦略: {req.strategy or req.input_text}
-方針: {req.policy or req.supplement}
-出力形式: {{"contradictions":[{{"point":"矛盾点","severity":"high/mid/low","resolution":"解決策"}}],"consistency_score":70,"overall_assessment":"総合評価"}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の内容から矛盾・齟齬を検出してください。
+
+【戦略文】
+{req.strategy or req.input_text}
+
+【方針文】
+{req.policy or req.supplement or "（なし）"}
+
+【共通ルール】
+- JSON以外の余計な文を絶対に返さないこと
+- 矛盾がなければcontradictionsを空配列にすること
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+以下のJSONスキーマで返してください:
+{{
+  "contradictions": [
+    {{
+      "type": "矛盾の種類（例: 目的手段衝突、KPIズレ、前提矛盾）",
+      "description": "矛盾の具体的な説明",
+      "why_problematic": "なぜ問題か",
+      "fix_direction": "修正方向"
+    }}
+  ],
+  "consistency_score": 70,
+  "overall_assessment": "総合評価"
+}}"""
 
     elif req.analysis_type == "execution":
-        prompt = f"""以下の目標に対する実行計画を生成せよ。JSONで返せ。
-目標・背景: {req.input_text}
-フレームワーク: {fw_str}
-出力形式: {{"phases":[{{"phase":"フェーズ名","duration":"期間","actions":["アクション"],"kpi":"KPI","risks":["リスク"]}}],"critical_path":"クリティカルパス","success_criteria":["成功条件"]}}"""
+        prompt = f"""あなたは戦略コンサルタントです。以下の内容から実行プランを作成してください。
+適用フレームワーク: {fw_str}
+
+【内容】
+{req.input_text}
+
+【共通ルール】
+- JSON以外の余計な文を絶対に返さないこと
+- 優先度はhigh / medium / lowで分類すること
+- 出力は必ず有効なJSONオブジェクトのみとすること
+
+以下のJSONスキーマで返してください:
+{{
+  "action_plan": [
+    {{
+      "task": "タスク名",
+      "owner": "担当者・部門",
+      "deadline": "期限の目安",
+      "kpi": "成功指標",
+      "priority": "high"
+    }}
+  ]
+}}"""
     else:
         return {"ok": False, "error": f"不明なanalysis_type: {req.analysis_type}"}
 
