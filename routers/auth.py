@@ -97,6 +97,22 @@ def login(req: LoginRequest):
     else:
         if not _verify_user(req.uid, req.password):
             raise HTTPException(status_code=403, detail="UID またはパスワードが正しくありません")
+        # 有効期限チェック
+        try:
+            from api.core.firestore_client import get_db as _gdb_auth
+            import datetime as _dt_auth
+            _usnap = _gdb_auth().collection("users").document(req.uid).get()
+            _ud = _usnap.to_dict() if _usnap.exists else {}
+            _is_unlimited = bool(_ud.get("is_unlimited", False))
+            _expires_at = str(_ud.get("expires_at", "")).strip()
+            if not _is_unlimited and _expires_at:
+                _exp_date = _dt_auth.date.fromisoformat(_expires_at[:10])
+                if _dt_auth.date.today() > _exp_date:
+                    raise HTTPException(status_code=403, detail="EXPIRED")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
         tenant_id = _get_user_tenant(req.uid)
         token = _make_token(uid=req.uid, role="user", tenant_id=tenant_id)
         return LoginResponse(token=token, uid=req.uid, role="user", tenant_id=tenant_id)
@@ -166,6 +182,7 @@ def register(req: RegisterRequest):
         "updated_at": _fs.SERVER_TIMESTAMP,
         "level_score": 0,
         "use_count_since_report": 0,
+        "expires_at": (datetime.datetime.utcnow() + datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
     })
     token = _make_token(uid=uid, role="user", tenant_id="default")
     return LoginResponse(token=token, uid=uid, role="user", tenant_id="default")

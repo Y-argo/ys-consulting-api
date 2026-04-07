@@ -125,13 +125,10 @@ def _update_level_score(tenant_id: str, uid: str, delta: int):
         elif new_score > r2t: rank = r3n
         elif new_score > r1t: rank = r2n
         else: rank = r1n
-        # use_count_since_report も +1
-        use_count = int(d.get("use_count_since_report", 0)) + 1
         db.collection("users").document(uid).set({
             "level_score": new_score,
             "level": rank,
             "level_last_delta": delta,
-            "use_count_since_report": use_count,
             "level_last_updated_at": fs.SERVER_TIMESTAMP,
         }, merge=True)
     except Exception:
@@ -382,11 +379,22 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _delta = _calc_score(req.message, tenant_id)
     _update_level_score(tenant_id, uid, _delta)
 
-    # RAGチャンク採用記録（LGBM教師データ）
+    # RAGチャンク採用記録（LGBM教師データ）＋固定概念カウント更新
     try:
         chunks = rag_retrieve_chunks(tenant_id=tenant_id, query=req.message, top_k=5)
         if chunks:
             db = get_db()
+            # 固定概念観測カウント+1（RAGチャンク採用時のみ）
+            try:
+                _fc_snap = db.collection("users").document(uid).get()
+                _fc_d = _fc_snap.to_dict() if _fc_snap.exists else {}
+                _fc_cnt = int(_fc_d.get("use_count_since_report", 0)) + 1
+                db.collection("users").document(uid).set(
+                    {"use_count_since_report": _fc_cnt},
+                    merge=True
+                )
+            except Exception:
+                pass
             for chunk in chunks:
                 chunk_id = chunk.get("chunk_id") or chunk.get("doc_id","")
                 if chunk_id:
@@ -451,6 +459,20 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
             pass
 
     _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured, images=generated_images)
+    # usage_logs に記録（total_chat_count 集計用）
+    try:
+        import datetime as _dt
+        get_db().collection("usage_logs").add({
+            "user_id": uid,
+            "tenant_id": tenant_id,
+            "prompt": req.message[:500],
+            "purpose_mode": getattr(req, "purpose_mode", "auto"),
+            "is_admin_test": False,
+            "recorded_at": _dt.datetime.utcnow().isoformat(),
+        })
+    except Exception:
+        pass
+
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=cases, images=generated_images, structured=structured)
 
 @router.get("/history/{chat_id}")
@@ -956,6 +978,12 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
             pass
     _save_message(tenant_id, uid, chat_id, "user", req.message)
     _save_message(tenant_id, uid, chat_id, "assistant", reply, images=generated_images)
+    # usage_log書き込み
+    try:
+        _ulog_db2 = get_db()
+        _ulog_db2.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "is_admin_test": False})
+    except Exception:
+        pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=generated_images)
 
 
@@ -1014,6 +1042,12 @@ def send_file(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=f"ファイル解析エラー: {e}")
     _save_message(tenant_id, uid, chat_id, "user", req.message)
     _save_message(tenant_id, uid, chat_id, "assistant", reply)
+    # usage_log書き込み
+    try:
+        _ulog_db3 = get_db()
+        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "is_admin_test": False})
+    except Exception:
+        pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[])
 
 
@@ -1073,6 +1107,12 @@ def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=f"投資解析エラー: {e}")
     _save_message(tenant_id, uid, chat_id, "user", req.message)
     _save_message(tenant_id, uid, chat_id, "assistant", reply)
+    # usage_log書き込み
+    try:
+        _ulog_db3 = get_db()
+        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "is_admin_test": False})
+    except Exception:
+        pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[])
 
 

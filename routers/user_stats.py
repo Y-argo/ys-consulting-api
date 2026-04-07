@@ -191,6 +191,7 @@ def get_user_stats(payload: dict = Depends(verify_token)):
         "fixed_concept_score": d.get("fixed_concept_score", None),
         "is_unlimited": True if payload.get("role") == "admin" else bool(d.get("is_unlimited", False)),
         "level_last_delta": int(d.get("level_last_delta", 0)),
+        "expires_at": str(d.get("expires_at", "")),
     }
 
 @router.get("/usage_logs")
