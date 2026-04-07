@@ -51,11 +51,19 @@ def _get_client():
     api_key = os.environ.get("GEMINI_API_KEY", "")
     return genai.Client(api_key=api_key) if api_key else genai.Client()
 
+_model_cache: dict = {"models": set(), "expires": 0}
+
 def _list_available_models(client) -> set:
+    import time
+    global _model_cache
+    if _model_cache["models"] and time.time() < _model_cache["expires"]:
+        return _model_cache["models"]
     try:
-        return {m.name.split("/")[-1] for m in client.models.list()}
+        models = {m.name.split("/")[-1] for m in client.models.list()}
+        _model_cache = {"models": models, "expires": time.time() + 600}
+        return models
     except Exception:
-        return set()
+        return _model_cache["models"] if _model_cache["models"] else set()
 
 def pick_model(ai_tier: str = "core") -> str:
     """利用可能なモデルからtiereに合ったものを選択。フォールバックあり"""

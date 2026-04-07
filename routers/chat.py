@@ -178,7 +178,8 @@ def _load_tenant_system_prompt(tenant_id: str) -> str:
         pass
     return DEFAULT_SYSTEM_PROMPT
 
-def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str) -> str:
+def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str):
+    """returns (prompt_str, chunks_list)"""
     try:
         chunks = rag_retrieve_chunks(tenant_id=tenant_id, query=query, top_k=5)
         if chunks:
@@ -186,10 +187,10 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str) -> st
                 f"【ナレッジ: {c.get('title', '')}】\n{c.get('text', '')}"
                 for c in chunks
             )
-            return f"{system_prompt}\n\n【参照ナレッジ】\n{rag_text}"
+            return f"{system_prompt}\n\n【参照ナレッジ】\n{rag_text}", chunks
     except Exception:
         pass
-    return system_prompt
+    return system_prompt, []
 
 # ── エンドポイント ─────────────────────────────────────────
 class ChatRequest(BaseModel):
@@ -224,27 +225,36 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 
     base_prompt   = _load_tenant_system_prompt(tenant_id)
 
-    # 脳内カルテ更新（非同期的に実行、失敗しても続行）
+    # 脳内カルテ更新（バックグラウンドスレッドで実行・メイン生成をブロックしない）
     intent_state = {}
-    try:
-        intent_state = update_user_intent_state(uid, tenant_id, history, req.message)
-    except Exception:
-        pass
+    import threading as _threading
+    _intent_result = {}
+    def _run_intent():
+        try:
+            _intent_result["state"] = update_user_intent_state(uid, tenant_id, history, req.message)
+        except Exception:
+            pass
+    _intent_thread = _threading.Thread(target=_run_intent, daemon=True)
+    _intent_thread.start()
 
-    # QueryPlan生成
+
+    # QueryPlan生成（RAG top_k・summary_lens・output_styleを決定）
     query_plan = {}
     try:
         query_plan = generate_query_plan(req.message, tenant_id, "mixed")
     except Exception:
         pass
-
-    # SummaryLens選択
+    # SummaryLens選択（query_planの結果を優先）
     try:
         lens_preset, lens_hier = lgbm_select_summary_lens(req.message, "auto")
     except Exception:
         lens_preset, lens_hier = "expert", "raw"
+    if query_plan.get("summary_lens", {}).get("preset"):
+        lens_preset = query_plan["summary_lens"]["preset"]
 
     # 脳内カルテをsystem_promptに注入
+    _intent_thread.join(timeout=0.0)
+    intent_state = _intent_result.get("state", {})
     intent_ctx = ""
     if intent_state:
         intent_ctx = f"""\n\n【ユーザーの脳内カルテ（深層プロファイル）】
@@ -254,7 +264,19 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 ・不足観点: {intent_state.get('missing_piece','')}
 ※上記を踏まえ、単なる回答ではなく「格を上げるための介入」を行え。"""
 
-    system_prompt = _build_system_with_rag(tenant_id, req.message, base_prompt) + intent_ctx
+    system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt)
+    system_prompt = system_prompt + intent_ctx
+    # SummaryLens注入
+    _LENS_INSTRUCTIONS = {
+        "expert":   "【出力スタイル: EXPERT】構造的・論理的に深く分析せよ。根拠・因果・構造を明示し、表面的な回答を避けよ。",
+        "executor": "【出力スタイル: EXECUTOR】具体的な手順・アクションを優先せよ。番号付きステップで実行可能な形で提示せよ。",
+        "mentor":   "【出力スタイル: MENTOR】成長・習慣・内省を促す回答をせよ。答えを与えるより気づきを引き出す問いかけを含めよ。",
+        "general":  "【出力スタイル: GENERAL】要点を簡潔にまとめよ。3〜5項目に絞り、わかりやすく整理せよ。",
+    }
+    if lens_preset in _LENS_INSTRUCTIONS:
+        system_prompt = _LENS_INSTRUCTIONS[lens_preset] + "\n\n" + system_prompt
+    if lens_hier == "prefer_summary":
+        system_prompt = "【要約優先】回答は簡潔にまとめること。長文は避けよ。\n\n" + system_prompt
 
     # モード別システムプロンプト追加
     _MODE_INSTRUCTIONS = {
@@ -379,9 +401,9 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _delta = _calc_score(req.message, tenant_id)
     _update_level_score(tenant_id, uid, _delta)
 
-    # RAGチャンク採用記録（LGBM教師データ）＋固定概念カウント更新
+    # RAGチャンク採用記録（LGBM教師データ）＋固定概念カウント更新（1回目RAG結果を再利用）
     try:
-        chunks = rag_retrieve_chunks(tenant_id=tenant_id, query=req.message, top_k=5)
+        chunks = _rag_chunks
         if chunks:
             db = get_db()
             # 固定概念観測カウント+1（RAGチャンク採用時のみ）

@@ -186,3 +186,64 @@ def register(req: RegisterRequest):
     })
     token = _make_token(uid=uid, role="user", tenant_id="default")
     return LoginResponse(token=token, uid=uid, role="user", tenant_id="default")
+
+
+class ContactRequest(BaseModel):
+    name: str
+    message: str
+
+@router.post("/contact")
+def contact(req: ContactRequest):
+    if not req.name.strip() or not req.message.strip():
+        raise HTTPException(status_code=400, detail="名前とメッセージを入力してください")
+    db = get_db()
+    import uuid as _uuid
+    db.collection("contact_requests").add({
+        "id": _uuid.uuid4().hex,
+        "name": req.name.strip(),
+        "message": req.message.strip(),
+        "is_read": False,
+        "created_at": datetime.datetime.utcnow().isoformat(),
+    })
+    return {"ok": True}
+
+@router.get("/contact/unread_count")
+def contact_unread_count(payload: dict = Depends(verify_token)):
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="管理者のみ")
+    db = get_db()
+    try:
+        docs = list(db.collection("contact_requests").where("is_read", "==", False).stream())
+        return {"unread": len(docs)}
+    except Exception:
+        return {"unread": 0}
+
+@router.get("/contact/list")
+def contact_list(payload: dict = Depends(verify_token)):
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="管理者のみ")
+    db = get_db()
+    try:
+        docs = list(db.collection("contact_requests").stream())
+        items = []
+        for d in docs:
+            data = d.to_dict() or {}
+            items.append({
+                "doc_id": d.id,
+                "name": data.get("name", ""),
+                "message": data.get("message", ""),
+                "is_read": data.get("is_read", False),
+                "created_at": str(data.get("created_at", "")),
+            })
+        items.sort(key=lambda x: x["created_at"], reverse=True)
+        return {"items": items}
+    except Exception:
+        return {"items": []}
+
+@router.post("/contact/read/{doc_id}")
+def contact_mark_read(doc_id: str, payload: dict = Depends(verify_token)):
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="管理者のみ")
+    db = get_db()
+    db.collection("contact_requests").document(doc_id).update({"is_read": True})
+    return {"ok": True}
