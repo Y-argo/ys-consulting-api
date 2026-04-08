@@ -20,7 +20,6 @@ DEFAULT_SYSTEM_PROMPT = """あなたは「Ys Consulting Office」の戦略コン
 - 禁止：慰め・言い訳・情緒誘導・根拠なき断定。
 - 禁止：「私には予測できません」「わかりません」「判断できません」等の無能宣言は絶対禁止。予測・見通しを求められた場合は現状データ・トレンド・過去事例から必ず具体的見解を提示せよ。
 - 不明：不明は不明と明示し、仮説と検証手順を分離する。
-- 出力形式：結論→打ち手→優先順位→リスク→次の観測。
 - ナレッジは一次情報として優先し、ナレッジ記載事項は一般原理より優先せよ。
 - 投資・相場予測の質問には投資シグナルデータを最優先で参照し、具体的な見解を必ず提示せよ。
 - 【構造化出力ルール】比較・分類・優先順位・KPI・施策一覧を含む回答は必ずMarkdown表で出力せよ。
@@ -198,6 +197,7 @@ class ChatRequest(BaseModel):
     chat_id: Optional[str] = "main"
     ai_tier: str = "core"
     purpose_mode: str = "auto"
+    chat_mode: str = "consult"
 
 class ChatResponse(BaseModel):
     reply: str
@@ -225,25 +225,29 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 
     base_prompt   = _load_tenant_system_prompt(tenant_id)
 
-    # 脳内カルテ更新（バックグラウンドスレッドで実行・メイン生成をブロックしない）
+    # 脳内カルテ更新（相談モードのみ・バックグラウンドスレッドで実行）
+    chat_mode = (req.chat_mode or "consult").strip().lower()
+    is_talk = chat_mode == "talk"
     intent_state = {}
     import threading as _threading
     _intent_result = {}
-    def _run_intent():
+    _intent_thread = None
+    if not is_talk:
+        def _run_intent():
+            try:
+                _intent_result["state"] = update_user_intent_state(uid, tenant_id, history, req.message)
+            except Exception:
+                pass
+        _intent_thread = _threading.Thread(target=_run_intent, daemon=True)
+        _intent_thread.start()
+
+    # QueryPlan生成（相談モードのみ）
+    query_plan = {}
+    if not is_talk:
         try:
-            _intent_result["state"] = update_user_intent_state(uid, tenant_id, history, req.message)
+            query_plan = generate_query_plan(req.message, tenant_id, "mixed")
         except Exception:
             pass
-    _intent_thread = _threading.Thread(target=_run_intent, daemon=True)
-    _intent_thread.start()
-
-
-    # QueryPlan生成（RAG top_k・summary_lens・output_styleを決定）
-    query_plan = {}
-    try:
-        query_plan = generate_query_plan(req.message, tenant_id, "mixed")
-    except Exception:
-        pass
     # SummaryLens選択（query_planの結果を優先）
     try:
         lens_preset, lens_hier = lgbm_select_summary_lens(req.message, "auto")
@@ -253,7 +257,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         lens_preset = query_plan["summary_lens"]["preset"]
 
     # 脳内カルテをsystem_promptに注入
-    _intent_thread.join(timeout=0.0)
+    if _intent_thread: _intent_thread.join(timeout=0.0)
     intent_state = _intent_result.get("state", {})
     intent_ctx = ""
     if intent_state:
@@ -264,7 +268,15 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 ・不足観点: {intent_state.get('missing_piece','')}
 ※上記を踏まえ、単なる回答ではなく「格を上げるための介入」を行え。"""
 
-    system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt)
+    if not is_talk:
+        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt)
+    else:
+        system_prompt, _rag_chunks = base_prompt, []
+        # 会話モード：コンサル形式の出力指示を上書き
+        system_prompt = system_prompt.replace(
+            "出力形式：結論→打ち手→優先順位→リスク→次の観測。",
+            "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ。"
+        ) + "\n\n【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"
     system_prompt = system_prompt + intent_ctx
     # SummaryLens注入
     _LENS_INSTRUCTIONS = {
@@ -303,6 +315,102 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _mode_key = (req.purpose_mode or "auto").strip().lower()
     if _mode_key in _MODE_INSTRUCTIONS:
         system_prompt = _MODE_INSTRUCTIONS[_mode_key] + "\n\n" + system_prompt
+    # FINANCEモード時: Firestoreの実シグナルデータを注入
+    if _mode_key == "finance":
+        try:
+            _db = get_db()
+            _sig_docs = list(_db.collection("investment_signals").limit(200).stream())
+            _sig_docs.sort(key=lambda d: str((d.to_dict() or {}).get("asof_date","")), reverse=True)
+            if _sig_docs:
+                _sig_ref = _db.collection("investment_signals").document(_sig_docs[0].id)
+                _sig_date = (_sig_docs[0].to_dict() or {}).get("asof_date","")
+                _goal = [d.to_dict() for d in _sig_ref.collection("goal_bottom").limit(500).stream()]
+                _watch = [d.to_dict() for d in _sig_ref.collection("watch_big_sell").limit(500).stream()]
+                _all_stocks_fin = [d.to_dict() for d in _sig_ref.collection("all_stocks").limit(2000).stream()]
+                _all = _goal + _watch + _all_stocks_fin
+                import re as _re_fin
+                _code_hits = _re_fin.findall(r'(?<![\d])\d{4,6}(?![\d])', req.message)
+                import unicodedata as _ucd
+                _msg_clean = _ucd.normalize("NFKC", req.message.replace("\u3000"," "))
+                _matched = []
+                for s in _all:
+                    _c = str(s.get("code",""))
+                    _n = str(s.get("company_name",""))
+                    if _c in _code_hits or (_c.rstrip("0") in _code_hits) or any(_c == h+"0" or _c == h+"00" for h in _code_hits):
+                        _matched.append(s); continue
+                    _n_norm = _ucd.normalize("NFKC", _n)
+                    _msg_words = _re_fin.findall(r'[A-Za-z]{2,}', _msg_clean) + _re_fin.findall(r'[\u4e00-\u9fff\u30a0-\u30ff]{2,}', _msg_clean)
+                # 2〜4文字の部分スライスも候補に追加（東電株価→東電・電株・株価等）
+                _cjk_all = _re_fin.findall(r'[\u4e00-\u9fff\u30a0-\u30ff]+', _msg_clean)
+                for _cjk in _cjk_all:
+                    for _slen in [2, 3]:
+                        for _si in range(len(_cjk) - _slen + 1):
+                            _msg_words.append(_cjk[_si:_si+_slen])
+                    def _subseq(w, t):
+                        it = iter(t)
+                        return all(c in it for c in w)
+                    if any(w in _n_norm or _subseq(w, _n_norm) for w in _msg_words if len(w)>=2):
+                        _matched.append(s)
+                # マッチなし かつ コードが抽出できた場合 → all_stocksから直接取得
+                if not _matched and _code_hits:
+                    for _chit in _code_hits:
+                        try:
+                            for _cid in [_chit, _chit+"0", _chit+"00"]:
+                                _sd = _sig_ref.collection("all_stocks").document(_cid).get()
+                                if _sd.exists:
+                                    _matched.append(_sd.to_dict()); break
+                        except:
+                            pass
+                # コードでdedup
+                _seen_codes = set()
+                _deduped = []
+                for _s in _matched:
+                    _sc = str(_s.get("code",""))
+                    if _sc not in _seen_codes:
+                        _seen_codes.add(_sc)
+                        _deduped.append(_s)
+                _matched = _deduped
+                _finance_candidates = []
+                if len(_matched) >= 2:
+                    _finance_candidates = [f"{r.get('code')} {r.get('company_name')}" for r in _matched[:5]]
+                    _cand_list = "\n".join([f"{i+1}. {c}" for i,c in enumerate(_finance_candidates)])
+                    system_prompt += f"\n\n【銘柄候補が複数ヒットしました】以下の候補を番号付きリストでユーザーに提示し、「以下のどちらの銘柄ですか？」と必ず聞き返せ。推測で回答することは絶対禁止。\n{_cand_list}"
+                def _fmt_stock(r):
+                    return (
+                        f"銘柄: {r.get('code')} {r.get('company_name')} セクター:{r.get('sector','')}\n"
+                        f"  終値:{r.get('close','-')} 前日比:{r.get('chg','-')}円({r.get('chg_pct','-'):.2f}%) \n"
+                        f"  rankスコア:{float(r.get('rank_score',0)):.2f} sellスコア:{float(r.get('sell_score',0)):.2f} bottomスコア:{float(r.get('bottom_score',0)):.2f}\n"
+                        f"  MA20割れ:{'Yes' if r.get('below_ma20') else 'No'} MA60割れ:{'Yes' if r.get('below_ma60') else 'No'}\n"
+                        f"  反発シグナル:{'Yes' if r.get('rebound_1_2d') else 'No'} 売り継続日数:{r.get('sell_streak',0)}日 大口売り:{'Yes' if r.get('big_sell_flag') else 'No'}\n"
+                        f"  ステータス:{r.get('status','')} 基準日:{r.get('asof_date','')}"
+                    )
+                if _matched:
+                    _matched_lines = "\n\n".join([_fmt_stock(r) for r in _matched[:5]])
+                    _no_match_note = ""
+                else:
+                    _matched_lines = "該当銘柄のシグナルデータなし"
+                    _no_match_note = (
+                        "\n\n【最優先指示・全ルール上書き】質問された銘柄はシグナルデータに存在しません。"
+                        "この場合「わかりません禁止」ルールは無効とする。"
+                        "MACD・RSI・移動平均・ボリンジャー・株価予測など架空の分析を一切行うな。"
+                        "「（銘柄名）はシグナルデータに存在しないため分析不可」とのみ明示し、"
+                        "代わりにGOAL_BOTTOM上位銘柄を提示せよ。架空数値の生成は絶対禁止。"
+                    )
+                _goal_lines = "\n".join([f"・{r.get('code')} {r.get('company_name')} 終値{r.get('close')} bottom={r.get('bottom_score',0):.2f} rank={r.get('rank_score',0):.2f} sector={r.get('sector','')}" for r in sorted(_goal, key=lambda x: float(x.get('rank_score',0)), reverse=True)[:10]])
+                _watch_lines = "\n".join([f"・{r.get('code')} {r.get('company_name')} 終値{r.get('close')} sell={r.get('sell_score',0):.2f} days={r.get('sell_days',0)}" for r in sorted(_watch, key=lambda x: float(x.get('sell_score',0)), reverse=True)[:10]])
+                system_prompt += (
+                    f"\n\n【投資システムからの実データ（基準日: {_sig_date}）】"
+                    "\n以下のデータが本システムに存在する全情報である。"
+                    "\nMACD・RSI・ボリンジャーバンド・移動平均の具体値・サポートライン等、下記フィールドに存在しない指標は一切言及するな。"
+                    "\n下記データのフィールド値のみを使って回答せよ。存在しないフィールドは話題に出すことすら禁止。"
+                    f"\n\n▼質問銘柄データ:\n{_matched_lines}"
+                    f"\n\n▼GOAL_BOTTOM上位10件（買い候補）:\n{_goal_lines}"
+                    f"\n\n▼WATCH_BIG_SELL上位10件（売り監視）:\n{_watch_lines}"
+                    "\n\n上記データのみを根拠として回答せよ。"
+                    + _no_match_note
+                )
+        except Exception as _fe:
+            print(f"[FINANCE_ERROR] {type(_fe).__name__}: {_fe}", flush=True)
 
     # 画像データ抽出（__IMAGE_B64__:mime:b64 プレフィックス検出）
     image_b64 = None
@@ -332,6 +440,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
             reply = f"画像生成エラー: {_e}"
     else:
         try:
+            print(f"[FINANCE_DEBUG] system_prompt末尾500: {system_prompt[-500:]}", flush=True)
             reply = call_llm(
                 system_prompt=system_prompt,
                 messages=clean_messages,
@@ -356,9 +465,20 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     except Exception:
         cases = []
 
-    # 構造化データ生成（戦略相談時のみ・画像生成は除外）
+    # 構造化データ生成（戦略相談時のみ・画像生成・雑談は除外）
     structured = None
-    if not generated_images and len(req.message.strip()) > 5:
+    _consulting_intents = {"相談", "意思決定", "分析", "作成", "予測", "投資"}
+    _qp_intent = query_plan.get("intent", "")
+    _is_talk_intent = "雑談" in _qp_intent
+    _mode_forced = (req.purpose_mode or "auto").strip().lower() != "auto"
+    _is_consulting = (not is_talk) and ((_mode_forced) or ((not _is_talk_intent) and (any(i in _qp_intent for i in _consulting_intents))))
+    # 相談モードでも雑談intentの場合は会話形式で返答
+    if (is_talk or _is_talk_intent) and not system_prompt.endswith("【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"):
+        system_prompt = system_prompt.replace(
+            "出力形式：結論→打ち手→優先順位→リスク→次の観測。",
+            "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ。"
+        ) + "\n\n【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"
+    if not generated_images and _is_consulting:
         try:
             import json as _json_s, re as _re_s
             _sp = (
@@ -367,8 +487,8 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
                 "cards必須キー: current, risk, plan (各5件の文字列配列・各項目は具体的数値・固有名詞・根拠を含む20字以上)\n"
                 "analysis必須キー: type, urgency, importance, mode\n"
                 "urgency/importanceは必ず '高'/'中'/'低' のいずれか\n"
-                "modeは必ず STRATEGY/NUMERIC/CONTROL/RISK/MARKETING/GROWTH/DIAGNOSIS/PLANNING/FINANCE/HR/CREATIVE/NEGOTIATION/AUTO のいずれか\n"
-                "summary: 根拠・数値・結論を含む2〜3行で記述せよ\n"
+                + (f"modeは必ず {_mode_key.upper()} で固定せよ（変更禁止）\n" if _mode_key != "auto" else "modeは必ず STRATEGY/NUMERIC/CONTROL/RISK/MARKETING/GROWTH/DIAGNOSIS/PLANNING/FINANCE/HR/CREATIVE/NEGOTIATION/AUTO のいずれか\n")
+                + "summary: 根拠・数値・結論を含む2〜3行で記述せよ\n"
                 "cards.current: 現状・事実・観測データを具体的に5件（一般論禁止・数値引用必須）\n"
                 "cards.risk: 問題・リスク・ボトルネックを因果関係付きで5件\n"
                 "cards.plan: 即実行可能な具体的施策を優先度順に5件（担当・期限・KPIを含む）\n"
@@ -376,7 +496,8 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
                 f"\n【直近の会話履歴（最新3件）】\n" + "\n".join([f"{m['role']}: {str(m.get('content',''))[:150]}" for m in messages[-4:-1]]) + "\n\n"
                 f"【今回の相談】: {req.message[:400]}\n"
                 f"【今回の回答要約】: {reply[:800]}\n"
-                "\n出力例(この形式厳守):\n"
+                + (f"【投資シグナル実データ】: {system_prompt[-1500:]}\n実データにない数値・指標（RSI/MACD/移動平均等）は絶対に捏造するな。\n" if _mode_key == "finance" else "")
+                + "\n出力例(この形式厳守):\n"
                 '{"summary":"売上15%減の根本原因は新規獲得コスト増加と離脱率上昇の複合要因。即時対処が必要。","cards":{"current":["新規獲得単価が前月比23%増加し収益を圧迫","リピート率が62%→54%に低下、離脱が加速","競合A社が価格15%引下げで顧客を奪取中","SNS広告ROIが1.8→1.2に悪化、費用対効果低下","スタッフ稼働率が87%で限界近く追加施策の余力なし"],"risk":["獲得コスト増加が継続すると3ヶ月で赤字転落","リピート離脱が止まらず既存顧客基盤が崩壊リスク","競合の価格攻勢に対抗できず市場シェア喪失","現状の広告依存構造では利益率改善が不可能","スタッフ疲弊による品質低下でさらなる離脱を招く懸念"],"plan":["離脱顧客への復帰DM施策を今週中に実施（目標: 復帰率10%）","SNS広告をROI1.5以上の媒体に集中し無駄を即カット","紹介制度導入で獲得コストを現状比30%削減を目指す","リピート特典の見直しで来店頻度を月1→月1.5回に引上げ","スタッフ1名採用検討で稼働率を80%以下に正常化"]},"analysis":{"type":"構造分析","urgency":"高","importance":"高","mode":"DIAGNOSIS"},"actions":["離脱顧客リストを今週中に抽出する","SNS広告のROI計測を媒体別に即開始する","競合価格調査を実施して差別化軸を再定義する"],"value_message":"売上減の構造的原因を特定し、即実行可能な優先施策を提示。"}'
             )
             _sr = call_llm(
@@ -401,38 +522,39 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _delta = _calc_score(req.message, tenant_id)
     _update_level_score(tenant_id, uid, _delta)
 
-    # RAGチャンク採用記録（LGBM教師データ）＋固定概念カウント更新（1回目RAG結果を再利用）
-    try:
-        chunks = _rag_chunks
-        if chunks:
-            db = get_db()
-            # 固定概念観測カウント+1（RAGチャンク採用時のみ）
-            try:
-                _fc_snap = db.collection("users").document(uid).get()
-                _fc_d = _fc_snap.to_dict() if _fc_snap.exists else {}
-                _fc_cnt = int(_fc_d.get("use_count_since_report", 0)) + 1
-                db.collection("users").document(uid).set(
-                    {"use_count_since_report": _fc_cnt},
-                    merge=True
-                )
-            except Exception:
-                pass
-            for chunk in chunks:
-                chunk_id = chunk.get("chunk_id") or chunk.get("doc_id","")
-                if chunk_id:
-                    db.collection("tenants").document(tenant_id).collection("lgbm_training_logs").add({
-                        "uid": uid,
-                        "chunk_id": chunk_id,
-                        "query": req.message[:500],
-                        "score": float(chunk.get("score",0)),
-                        "adopted": True,
-                        "purpose_mode": "auto",
-                        "recorded_at": __import__("datetime").datetime.now().isoformat(),
-                        "tenant_id": tenant_id,
-                        "label": 1,
-                    })
-    except Exception:
-        pass
+    # RAGチャンク採用記録（LGBM教師データ）＋固定概念カウント更新（相談モードのみ）
+    if not is_talk:
+        try:
+            chunks = _rag_chunks
+            if chunks:
+                db = get_db()
+                # 固定概念観測カウント+1（RAGチャンク採用時のみ）
+                try:
+                    _fc_snap = db.collection("users").document(uid).get()
+                    _fc_d = _fc_snap.to_dict() if _fc_snap.exists else {}
+                    _fc_cnt = int(_fc_d.get("use_count_since_report", 0)) + 1
+                    db.collection("users").document(uid).set(
+                        {"use_count_since_report": _fc_cnt},
+                        merge=True
+                    )
+                except Exception:
+                    pass
+                for chunk in chunks:
+                    chunk_id = chunk.get("chunk_id") or chunk.get("doc_id","")
+                    if chunk_id:
+                        db.collection("tenants").document(tenant_id).collection("lgbm_training_logs").add({
+                            "uid": uid,
+                            "chunk_id": chunk_id,
+                            "query": req.message[:500],
+                            "score": float(chunk.get("score",0)),
+                            "adopted": True,
+                            "purpose_mode": "auto",
+                            "recorded_at": __import__("datetime").datetime.now().isoformat(),
+                            "tenant_id": tenant_id,
+                            "label": 1,
+                        })
+        except Exception:
+            pass
 
     _save_message(tenant_id, uid, chat_id, "user", req.message)
     # assistant save_message はGCS保存後に実行
@@ -1062,15 +1184,48 @@ def send_file(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"ファイル解析エラー: {e}")
+    # 構造化カード生成（投資専用フォーマット）
+    _inv_structured = None
+    try:
+        import json as _jsi, re as _rei
+        _inv_sp = (
+            "次のJSONキー構造のみで回答せよ。前置き禁止。コードブロック禁止。\n"
+            "必須キー: summary, cards, analysis, actions, value_message\n"
+            "cards必須キー: current, risk, plan\n"
+            "current: 注目銘柄・シグナル情報を5件（銘柄コード・社名・スコア・終値・前日比を含む）\n"
+            "risk: 投資リスク・注意銘柄・市場リスクを5件\n"
+            "plan: 具体的な投資アクション・エントリー戦略・出口戦略を5件\n"
+            "analysis必須キー: type, urgency, importance, mode\n"
+            "typeは必ず '投資シグナル分析'\n"
+            "urgency/importanceは必ず '高'/'中'/'低'\n"
+            "modeは必ず FINANCE\n"
+            "summary: シグナル全体の相場見解を2〜3行で具体的に記述\n"
+            "value_message: 今回の分析の要点を1行で\n"
+            f"【投資シグナルデータ】{invest_ctx[:1200]}\n"
+            f"【ユーザーの問い】{req.message[:300]}\n"
+            f"【AI回答要約】{reply[:600]}\n"
+        )
+        _inv_sr = call_llm(
+            system_prompt="JSONのみ出力。指定キー構造厳守。",
+            messages=[{"role":"user","content":_inv_sp}],
+            ai_tier="core", max_tokens=700
+        )
+        _inv_m = _rei.search(r'\{.*\}', _inv_sr, _rei.DOTALL)
+        if _inv_m:
+            _inv_parsed = _jsi.loads(_inv_m.group(0))
+            if all(k in _inv_parsed for k in ["summary","cards","analysis","actions","value_message"]):
+                _inv_structured = _inv_parsed
+    except Exception:
+        pass
     _save_message(tenant_id, uid, chat_id, "user", req.message)
-    _save_message(tenant_id, uid, chat_id, "assistant", reply)
+    _save_message(tenant_id, uid, chat_id, "assistant", reply, structured=_inv_structured)
     # usage_log書き込み
     try:
         _ulog_db3 = get_db()
         _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "is_admin_test": False})
     except Exception:
         pass
-    return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[])
+    return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[], structured=_inv_structured)
 
 
 # ============================================================
@@ -1092,21 +1247,63 @@ def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
     invest_ctx = ""
     try:
         db = get_db()
+        import google.cloud.firestore as _fsm
         sig_docs = list(
             db.collection("investment_signals")
-            .order_by("asof_date", direction=__import__("google.cloud.firestore", fromlist=["firestore"]).firestore.Query.DESCENDING)
+            .order_by("asof_date", direction=_fsm.Query.DESCENDING)
             .limit(1)
             .stream()
         )
         if sig_docs:
             sig = sig_docs[0].to_dict() or {}
             asof = sig.get("asof_date", "不明")
-            goal = sig.get("goal_count", 0)
-            watch = sig.get("watch_count", 0)
+            # GOAL_BOTTOM銘柄データ取得（上位500件）
+            goal_docs = list(sig_docs[0].reference.collection("goal_bottom").limit(500).stream())
+            goal_all = [gd.to_dict() or {} for gd in goal_docs]
+            # WATCH_BIG_SELL銘柄データ取得（上位500件）
+            sell_docs = list(sig_docs[0].reference.collection("watch_big_sell").limit(500).stream())
+            sell_all = [sd.to_dict() or {} for sd in sell_docs]
+            # ユーザーメッセージ内の銘柄を検索
+            matched = [r for r in goal_all + sell_all
+                       if str(r.get("code", "")) in req.message
+                       or str(r.get("company_name", "")) in req.message]
+            if matched:
+                matched_lines = []
+                for r in matched[:5]:
+                    matched_lines.append(
+                        f"  [{r.get('code','')}]{r.get('company_name','')} "
+                        f"終値:{r.get('close','')} 前日比:{r.get('chg_pct','')}% "
+                        f"底打ちスコア:{r.get('bottom_score','')} 売りスコア:{r.get('sell_score','')} "
+                        f"反発確率(1-2日):{r.get('rebound_1_2d','')} 売り継続日数:{r.get('sell_days','')}"
+                    )
+                stock_detail = "\n■ 該当銘柄データ:\n" + "\n".join(matched_lines)
+            else:
+                stock_detail = (
+                    "\n■ 【最優先指示・全ルール上書き】質問された銘柄は最新シグナルデータに存在しません。"
+                    "この場合に限り「わかりません禁止」ルールは適用しない。"
+                    "株価予測・テクニカル分析（MACD・RSI・移動平均・ボリンジャー等）は一切行わず、"
+                    "「当該銘柄（社名/コード）はシグナルデータに存在しないため分析不可」とのみ回答し、"
+                    "代わりにGOAL_BOTTOM上位銘柄を提示せよ。架空の数値・指標の生成は絶対禁止。"
+                )
+            goal_stocks = [
+                f"  [{r.get('code','')}]{r.get('company_name','')} "
+                f"底打ちスコア:{r.get('bottom_score','')} 終値:{r.get('close','')} 前日比:{r.get('chg_pct','')}%"
+                for r in goal_all[:10]
+            ]
+            sell_stocks = [
+                f"  [{r.get('code','')}]{r.get('company_name','')} "
+                f"売りスコア:{r.get('sell_score','')} 終値:{r.get('close','')} 前日比:{r.get('chg_pct','')}%"
+                for r in sell_all[:10]
+            ]
             invest_ctx = (
                 f"\n\n【最新投資シグナル（基準日: {asof}）】\n"
-                f"GOAL_BOTTOM候補: {goal}件 / WATCH_BIG_SELL監視: {watch}件\n"
-                "上記シグナルデータを最優先で参照し、具体的な投資見解を提示せよ。"
+                f"■ GOAL_BOTTOM（底打ち反発候補）上位10件:\n" +
+                "\n".join(goal_stocks or ["データなし"]) +
+                f"\n\n■ WATCH_BIG_SELL（大口売り監視）上位10件:\n" +
+                "\n".join(sell_stocks or ["データなし"]) +
+                stock_detail +
+                "\n\n【厳守】上記シグナルデータに存在する数値のみ根拠として使用せよ。"
+                "MACD・RSI・移動平均などデータに存在しない指標の推測・捏造は絶対禁止。"
             )
     except Exception:
         pass
@@ -1114,7 +1311,7 @@ def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
     system_prompt = (
         _load_tenant_system_prompt(tenant_id) +
         "\n\n【投資アルゴリズムモード】投資・相場・銘柄に特化した分析を行え。"
-        "予測・見通しは必ず具体的数値と根拠を示せ。「わかりません」は禁止。" +
+        "シグナルデータに存在する数値のみ根拠とし、データにない指標を推測・捏造することは絶対禁止。" +
         invest_ctx
     )
     messages = _load_history(tenant_id, uid, chat_id)

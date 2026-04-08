@@ -44,7 +44,7 @@ def update_user_intent_state(uid: str, tenant_id: str, history: list, current_p:
 def generate_query_plan(user_prompt: str, tenant_id: str, level: str) -> dict:
     """入力から最適な検索・要約計画(Query Plan)をJSONで生成"""
     schema = '''{
-  "intent":"相談/意思決定/分析/要約/作成",
+  "intent":"相談/意思決定/分析/要約/作成/雑談",
   "why":"なぜ今それを聞くのか（1行）",
   "retrieval":{"top_k_total":20,"recency_bias":"high/med/low"},
   "summary_lens":{"preset":"expert/executor/mentor/general","chars":900},

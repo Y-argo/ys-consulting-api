@@ -253,7 +253,7 @@ def stock_analysis(body: dict = Body(...), payload: dict = Depends(verify_token)
                 for s in stocks:
                     code = str(s.get("code",""))
                     name = str(s.get("company_name",""))
-                    if query in code or query.lower() in name.lower():
+                    if (query.isdigit() and query == code) or (not query.isdigit() and query.lower() in name.lower()):
                         s["_source"] = col
                         s["_asof_date"] = asof_date
                         matched.append(s)
@@ -284,7 +284,7 @@ def stock_analysis(body: dict = Body(...), payload: dict = Depends(verify_token)
     else:
         stock_info = f"銘柄「{query}」のシグナルデータは見つかりませんでした。一般的な市場情報で分析します。"
 
-    prompt = f"""以下の銘柄データを戦略投資コンサルタントとして徹底分析せよ。JSONのみ出力。
+    prompt = f"""以下の銘柄データを戦略投資コンサルタントとして徹底分析せよ。JSONのみ出力。confidenceはrebound_1_2dを0-100換算した値を使用し、データがない場合はbottom_scoreとsell_scoreから推定せよ。
 
 {stock_info}
 
@@ -293,7 +293,7 @@ def stock_analysis(body: dict = Body(...), payload: dict = Depends(verify_token)
   "code": "銘柄コード",
   "name": "社名",
   "action": "買い検討/様子見/回避",
-  "confidence": 75,
+  "confidence": rebound_1_2dの値を0-100に換算した数値（データがない場合はsell_score・bottom_scoreから推定）,
   "summary": "投資判断サマリー（2-3行）",
   "signal_analysis": {{
     "rank_trend": "ランクトレンドの評価",
