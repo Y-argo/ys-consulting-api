@@ -1051,3 +1051,19 @@ def save_custom_prompt(body: dict = Body(...), payload: dict = Depends(verify_to
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/plan")
+def get_user_plan(payload: dict = Depends(verify_token)):
+    """ログイン中ユーザーのプラン情報を返す"""
+    uid = payload.get("uid", "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    try:
+        snap = db.collection("users").document(uid).get()
+        d = (snap.to_dict() or {}) if snap.exists else {}
+        plan = d.get("plan") or ""
+        return {"plan": plan}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

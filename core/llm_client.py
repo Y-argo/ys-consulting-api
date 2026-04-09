@@ -3,6 +3,23 @@ import os
 import base64 as _b64
 from google import genai
 from google.genai import types
+import time as _time
+
+# ── models.list() キャッシュ（300秒TTL） ──
+_model_cache: dict = {"models": set(), "ts": 0}
+_CACHE_TTL = 300
+
+def _list_available_models_cached(client) -> set:
+    now = _time.time()
+    if _model_cache["models"] and (now - _model_cache["ts"]) < _CACHE_TTL:
+        return _model_cache["models"]
+    try:
+        result = {m.name.split("/")[-1] for m in client.models.list()}
+        _model_cache["models"] = result
+        _model_cache["ts"] = now
+        return result
+    except Exception:
+        return _model_cache["models"] or set()
 
 # モデル優先リスト（旧pick_model_candidatesと同仕様）
 _CORE_PREFERRED = [
@@ -70,7 +87,7 @@ def pick_model(ai_tier: str = "core") -> str:
     preferred = MODEL_TIERS.get(ai_tier, _CORE_PREFERRED)
     try:
         client = _get_client()
-        available = _list_available_models(client)
+        available = _list_available_models_cached(client)
         if available:
             for m in preferred:
                 if m in available:
@@ -132,10 +149,10 @@ def call_llm(
         else:
             sdk_messages.append(types.Content(role=role, parts=[types.Part(text=m["content"])]))
 
-    # モデル候補を順番に試す（フォールバック付き）
+    # モデル候補を順番に試す（pick_modelで選定済みを先頭に）
     preferred = MODEL_TIERS.get(ai_tier, _CORE_PREFERRED)
     try:
-        available = _list_available_models(client)
+        available = _list_available_models_cached(client)
         candidates = [m for m in preferred if m in available] if available else preferred[:2]
         if not candidates:
             candidates = [model_name]
