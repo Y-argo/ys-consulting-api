@@ -55,6 +55,22 @@ def _get_user_tenant(uid: str) -> str:
         pass
     return "default"
 
+def _get_user_corporate_info(uid: str) -> dict:
+    """ULTRAテナントの企業契約情報を返す"""
+    try:
+        db = get_db()
+        doc = db.collection("users").document(uid).get()
+        if doc.exists:
+            d = doc.to_dict() or {}
+            return {
+                "ultra_corporate": d.get("ultra_corporate", False),
+                "ultra_role": d.get("ultra_role", ""),  # "admin" or "member"
+                "corporate_tenant_id": d.get("corporate_tenant_id", ""),
+            }
+    except Exception:
+        pass
+    return {"ultra_corporate": False, "ultra_role": "", "corporate_tenant_id": ""}
+
 def _make_token(uid: str, role: str, tenant_id: str = "default") -> str:
     payload = {
         "uid": uid,

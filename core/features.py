@@ -26,6 +26,8 @@ PLAN_PRICES: dict[str, int] = {
     "standard": 9800,
     "pro":      39800,
     "apex":     89800,
+    "ultra_member": 300000,
+    "ultra_admin":  300000,
 }
 
 PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
@@ -101,13 +103,52 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_graph":              True,
         "diag_file":               True,
     },
+    # ULTRA企業契約: メンバー=PRO相当、管理者=APEX相当
+    "ultra_member": {
+        "image_generation":        True,
+        "personal_consulting":     True,
+        "current_issue_diagnosis": True,
+        "decision_metrics":        True,
+        "fixed_concept_report":    True,
+        "ascend_ultra":            True,
+        "ascend_apex":             False,
+        "image_gallery":           True,
+        "diag_structure":          True,
+        "diag_issue":              True,
+        "diag_comparison":         True,
+        "diag_contradiction":      True,
+        "diag_execution":          True,
+        "diag_investment":         False,
+        "diag_graph":              True,
+        "diag_file":               True,
+    },
+    "ultra_admin": {
+        "image_generation":        True,
+        "personal_consulting":     True,
+        "current_issue_diagnosis": True,
+        "decision_metrics":        True,
+        "fixed_concept_report":    True,
+        "ascend_ultra":            True,
+        "ascend_apex":             True,
+        "image_gallery":           True,
+        "diag_structure":          True,
+        "diag_issue":              True,
+        "diag_comparison":         True,
+        "diag_contradiction":      True,
+        "diag_execution":          True,
+        "diag_investment":         True,
+        "diag_graph":              True,
+        "diag_file":               True,
+    },
 }
 
 PLAN_ALLOWED_MODES: dict[str, list[str]] = {
     "starter":  ["auto"],
     "standard": ["auto", "numeric", "growth", "control", "analysis", "planning", "risk"],
-    "pro":      [],
-    "apex":     [],
+    "pro":           [],
+    "apex":          [],
+    "ultra_member":  [],
+    "ultra_admin":   [],
 }
 
 
@@ -119,7 +160,7 @@ def load_user_plan(uid: str) -> str:
         snap = db.collection("users").document(uid).get()
         d = (snap.to_dict() or {}) if snap.exists else {}
         plan = d.get("plan") or "starter"
-        if plan not in PLAN_FEATURE_MAP:
+        if plan not in PLAN_FEATURE_MAP:  # ultra_member/ultra_admin も含む
             plan = "starter"
         return plan
     except Exception:

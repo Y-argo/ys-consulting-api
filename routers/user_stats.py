@@ -610,18 +610,19 @@ def get_chat_examples(payload: dict = Depends(verify_token)):
 
 @router.get("/purpose_modes")
 def get_purpose_modes(payload: dict = Depends(verify_token)):
-    tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
-    db = get_db()
-    try:
-        for tid in [tenant_id, DEFAULT_TENANT]:
-            doc = db.collection("system_settings").document(f"purpose_mode_config_{tid}").get()
-            if doc.exists:
-                keys = [k for k in (doc.to_dict() or {}).get("enabled_modes", []) if k in ALL_PURPOSE_MODES]
-                if keys:
-                    return {"modes": [{"id": k, "label": ALL_PURPOSE_MODES[k]} for k in keys]}
-    except Exception:
-        pass
-    return {"modes": [{"id": k, "label": v} for k, v in ALL_PURPOSE_MODES.items()]}
+    uid = payload.get("uid", "")
+    from api.core.features import load_user_plan
+    plan = load_user_plan(uid)
+    # プラン別モード制御
+    STANDARD_MODES = ["auto", "numeric", "growth", "control", "analysis", "planning", "risk"]
+    if plan == "starter":
+        keys = ["auto"]
+    elif plan == "standard":
+        keys = STANDARD_MODES
+    else:
+        # pro/apex/ultra_admin/ultra_member → 全モード
+        keys = list(ALL_PURPOSE_MODES.keys())
+    return {"modes": [{"id": k, "label": ALL_PURPOSE_MODES[k]} for k in keys if k in ALL_PURPOSE_MODES]}
 
 @router.get("/theme")
 def get_theme(payload: dict = Depends(verify_token)):
