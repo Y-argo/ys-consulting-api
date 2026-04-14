@@ -1,5 +1,5 @@
 # api/routers/user_stats.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
 from google.cloud import firestore as fs
 from api.routers.auth import verify_token
 from api.core.firestore_client import get_db, DEFAULT_TENANT
@@ -1066,5 +1066,184 @@ def get_user_plan(payload: dict = Depends(verify_token)):
         d = (snap.to_dict() or {}) if snap.exists else {}
         plan = d.get("plan") or ""
         return {"plan": plan}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/user_ai_settings")
+def get_user_ai_settings(payload: dict = Depends(verify_token)):
+    """ユーザーのAI設定（説明・会話のきっかけ）を返す"""
+    from fastapi import Body
+    uid = payload.get("uid", "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    snap = db.collection("users").document(uid).get()
+    d = (snap.to_dict() or {}) if snap.exists else {}
+    return {
+        "ai_description":       d.get("ai_description", ""),
+        "conversation_starters": d.get("conversation_starters", []),
+    }
+
+@router.post("/user_ai_settings")
+def save_user_ai_settings(body: dict = Body(...), payload: dict = Depends(verify_token)):
+    """ユーザーのAI設定（説明・会話のきっかけ）を保存する"""
+    from fastapi import Body
+    uid = payload.get("uid", "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    db.collection("users").document(uid).set({
+        "ai_description":        (body.get("ai_description") or "").strip(),
+        "conversation_starters": [s.strip() for s in (body.get("conversation_starters") or []) if s.strip()][:4],
+        "updated_at":            fs.SERVER_TIMESTAMP,
+    }, merge=True)
+    return {"ok": True}
+
+@router.get("/user_knowledge_list")
+def get_user_knowledge_list(payload: dict = Depends(verify_token)):
+    """ユーザー専用知識ファイル一覧を返す"""
+    uid = payload.get("uid", "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    user_tenant = f"user__{uid}"
+    try:
+        links = list(db.collection("tenant_source_links").where("tenant_id", "==", user_tenant).limit(50).stream())
+        result = []
+        for lnk in links:
+            ld = lnk.to_dict() or {}
+            result.append({
+                "source_id": ld.get("source_id", ""),
+                "title":     ld.get("title", ""),
+                "link_id":   lnk.id,
+            })
+        return {"files": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/user_knowledge_upload")
+async def upload_user_knowledge(
+    file: UploadFile = File(...),
+    payload: dict = Depends(verify_token),
+):
+    """ユーザー専用知識ファイルをアップロード・チャンク・ベクトル登録する"""
+    from api.core.rag import embed_text as _embed_text
+    uid = payload.get("uid", "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    user_tenant = f"user__{uid}"
+    _bytes = await file.read()
+    fname = file.filename or "file"
+    ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else "txt"
+    text = ""
+    if ext in ("txt", "md", "csv"):
+        text = _bytes.decode("utf-8", errors="replace")
+    elif ext == "odt":
+        try:
+            import zipfile, re as _re2, io as _io2
+            with zipfile.ZipFile(_io2.BytesIO(_bytes)) as _z:
+                with _z.open("content.xml") as _cx:
+                    _xml = _cx.read().decode("utf-8", errors="replace")
+            text = _re2.sub(r"<[^>]+>", " ", _xml)
+        except Exception:
+            text = ""
+    elif ext in ("xlsx", "xls"):
+        try:
+            import pandas as _pd2, io as _io3
+            _dfs = _pd2.read_excel(_io3.BytesIO(_bytes), sheet_name=None)
+            text = "\n".join(f"[{sn}]\n{df.to_string(index=False)}" for sn, df in _dfs.items())
+        except Exception:
+            text = ""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="テキスト抽出失敗または空ファイル")
+
+    # URL検出→fetch→本文追記
+    import re as _re_url
+    import urllib.request as _urllib_req
+    _url_pattern = _re_url.compile(r'https?://[^\s　》「」】〕｠〉』、。，．《〈〖『【〔］［）（＞＜]+')
+    _found_urls = list(dict.fromkeys(_url_pattern.findall(text)))[:10]
+    for _url in _found_urls:
+        try:
+            _req = _urllib_req.Request(_url, headers={"User-Agent": "Mozilla/5.0"})
+            with _urllib_req.urlopen(_req, timeout=8) as _resp:
+                _raw = _resp.read()
+                _charset = "utf-8"
+                _ct = _resp.headers.get_content_charset()
+                if _ct:
+                    _charset = _ct
+                _html = _raw.decode(_charset, errors="replace")
+            # タグ除去・本文抽出
+            _html = _re_url.sub(r'<script[^>]*>.*?</script>', '', _html, flags=_re_url.DOTALL|_re_url.IGNORECASE)
+            _html = _re_url.sub(r'<style[^>]*>.*?</style>', '', _html, flags=_re_url.DOTALL|_re_url.IGNORECASE)
+            _plain = _re_url.sub(r'<[^>]+>', ' ', _html)
+            _plain = _re_url.sub('[ \t]+', ' ', _plain).strip()
+            _plain = _re_url.sub('\n{3,}', '\n\n', _plain)
+            if _plain.strip():
+                text += "\n\n[URL: " + _url + "]\n" + _plain[:3000]
+        except Exception:
+            pass
+
+    source_id = f"user__{uid}__{fname}"
+    chunk_size = 800
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    db.collection("sources").document(source_id).set({
+        "source_id":   source_id,
+        "title":       fname,
+        "content":     text[:2000],
+        "category":    "ユーザー知識",
+        "source_type": "file",
+        "created_at":  fs.SERVER_TIMESTAMP,
+        "updated_at":  fs.SERVER_TIMESTAMP,
+    }, merge=True)
+    link_id = f"{user_tenant}__{source_id}"
+    db.collection("tenant_source_links").document(link_id).set({
+        "tenant_id":   user_tenant,
+        "source_id":   source_id,
+        "title":       fname,
+        "category":    "ユーザー知識",
+        "source_type": "file",
+        "enabled":     True,
+        "priority":    1,
+        "updated_at":  fs.SERVER_TIMESTAMP,
+    }, merge=True)
+    wrote = 0
+    for ci, chunk in enumerate(chunks[:10]):
+        if not chunk.strip():
+            continue
+        try:
+            emb = _embed_text(chunk)
+            cid = f"{source_id}_c{ci}"
+            db.collection("source_chunks").document(cid).set({
+                "chunk_id":    cid,
+                "doc_id":      source_id,
+                "source_id":   source_id,
+                "title":       fname,
+                "text":        chunk,
+                "embedding":   emb,
+                "category":    "ユーザー知識",
+                "source_type": "file",
+                "chunk_index": ci,
+            }, merge=True)
+            wrote += 1
+        except Exception:
+            pass
+    return {"ok": True, "source_id": source_id, "chunks": wrote}
+
+@router.delete("/user_knowledge/{source_id:path}")
+def delete_user_knowledge(source_id: str, payload: dict = Depends(verify_token)):
+    """ユーザー専用知識ファイルを削除する"""
+    uid = payload.get("uid", "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    user_tenant = f"user__{uid}"
+    link_id = f"{user_tenant}__{source_id}"
+    try:
+        db.collection("tenant_source_links").document(link_id).delete()
+        old_chunks = list(db.collection("source_chunks").where("source_id", "==", source_id).limit(20).stream())
+        for c in old_chunks:
+            c.reference.delete()
+        return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

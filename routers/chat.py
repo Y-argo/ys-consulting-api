@@ -23,7 +23,34 @@ DEFAULT_SYSTEM_PROMPT = """あなたは「Ys Consulting Office」の戦略コン
 - ナレッジは一次情報として優先し、ナレッジ記載事項は一般原理より優先せよ。
 - 投資・相場予測の質問には投資シグナルデータを最優先で参照し、具体的な見解を必ず提示せよ。
 - 【構造化出力ルール】比較・分類・優先順位・KPI・施策一覧を含む回答は必ずMarkdown表で出力せよ。
-- 【表フォーマット】表のセパレーター行は必ず | --- | --- | 形式のみ使用せよ。それ以外の形式（|---|、|:---|等）は禁止。"""
+- 【表フォーマット】表のセパレーター行は必ず | --- | --- | 形式のみ使用せよ。それ以外の形式（|---|、|:---|等）は禁止。
+- 【絶対禁止】存在しないファイル名・資料名・書籍名・URLを絶対に捏造するな。「〇〇.pptx」「〇〇.pdf」等の架空の資料名を回答に含めることは厳禁。
+
+【ASCENDプラン定義 — 以下以外の情報は絶対に捏造・推測するな。不明な場合は「プラン詳細はYs Consulting Officeにお問い合わせください」とのみ回答せよ】
+
+■ STARTER：¥0（新規7日間）
+ エンジン: Core / AUTOモード
+ 利用可能: AIチャット(AUTOモード)、RAG検索、レベルスコア
+ 対象外: 診断機能全般、画像生成、ファイル診断、固定概念レポート、個人相談、投資シグナル
+
+■ STANDARD：¥9,800/月
+ エンジン: Core / 7モード対応
+ 利用可能: AIチャット(7モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ(構造/課題/比較/矛盾/実行)、画像生成、画像・ファイル解析(チャット内)
+ 対象外: ファイル診断(Ultraエンジン)、固定概念レポート、個人相談、投資シグナル、ASCEND Ultra/Apex
+
+■ PRO：¥39,800/月
+ エンジン: Ultra / 全19モード対応
+ 利用可能: AIチャット(全19モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ全6種、ファイル診断(Chain of Thought分析)、固定概念レポート(LGBM自動生成)、画像生成、画像ギャラリー、個人相談(スレッド往復)、ASCEND Ultra解放
+ 対象外: 投資シグナル、ASCEND Apex
+
+■ APEX：¥89,800/月
+ エンジン: Apex / 全19モード対応
+ 利用可能: 全機能解放、AIチャット(全19モード)、ファイル診断、固定概念レポート、投資シグナル(全銘柄)、ASCEND Apex(最上位AIエンジン)、個人相談、画像生成、ギャラリー、診断タブ全8種(投資シグナルタブ含む)
+
+■ ULTRA：¥300,000/月〜（要相談・顧問契約）
+ エンジン: Apex / 全19モード対応
+ 利用可能: ASCEND全機能完全解放、Ys Consulting Office顧問契約付き、社員10名まで個別アカウント発行、企業テナント共有(RAG・診断履歴)、月次戦術レポート提出、新機能先行利用、月次ミーティング・直接支援
+ 契約・問い合わせ: Ys Consulting Officeに直接連絡（UID記載必須）"""
 
 # ── app.py と同一の Firestore パス ────────────────────────
 # chat_sessions/{scope}__{tenant_id}__{uid}__{chat_id}/messages/{msg_id}
@@ -63,11 +90,14 @@ def _load_score_words(tenant_id: str) -> dict:
             doc = db.collection("system_settings").document(f"score_config_{tid}").get()
             if doc.exists:
                 d = doc.to_dict() or {}
+                def _split_words(s):
+                    import re as _re
+                    return [w.strip() for w in _re.split(r"[,\n]+", s or "") if w.strip()]
                 return {
-                    "struct": [w.strip() for w in d.get("struct_words","").split(",") if w.strip()],
-                    "strategy": [w.strip() for w in d.get("strategy_words","").split(",") if w.strip()],
-                    "exec": [w.strip() for w in d.get("exec_words","").split(",") if w.strip()],
-                    "emotion": [w.strip() for w in d.get("emotion_words","").split(",") if w.strip()],
+                    "struct": _split_words(d.get("struct_words","")),
+                    "strategy": _split_words(d.get("strategy_words","")),
+                    "exec": _split_words(d.get("exec_words","")),
+                    "emotion": _split_words(d.get("emotion_words","")),
                     "struct_pt": int(d.get("struct_pt", 3)),
                     "strategy_pt": int(d.get("strategy_pt", 2)),
                     "exec_pt": int(d.get("exec_pt", 1)),
@@ -164,29 +194,104 @@ def _load_history(tenant_id: str, uid: str, chat_id: str = "main", limit: int = 
         result.append(msg)
     return result
 
-def _load_tenant_system_prompt(tenant_id: str) -> str:
+PLAN_DEFINITION = """
+
+【ASCENDプラン定義 — 以下以外の情報は絶対に捏造・推測するな。不明な場合は「プラン詳細はYs Consulting Officeにお問い合わせください」とのみ回答せよ】
+
+■ STARTER：¥0（新規7日間）
+ エンジン: Core / AUTOモード
+ 利用可能: AIチャット(AUTOモード)、RAG検索、レベルスコア
+ 対象外: 診断機能全般、画像生成、ファイル診断、固定概念レポート、個人相談、投資シグナル
+
+■ STANDARD：¥9,800/月
+ エンジン: Core / 7モード対応
+ 利用可能: AIチャット(7モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ(構造/課題/比較/矛盾/実行)、画像生成、画像・ファイル解析(チャット内)
+ 対象外: ファイル診断(Ultraエンジン)、固定概念レポート、個人相談、投資シグナル、ASCEND Ultra/Apex
+
+■ PRO：¥39,800/月
+ エンジン: Ultra / 全19モード対応
+ 利用可能: AIチャット(全19モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ全6種、ファイル診断(Chain of Thought分析)、固定概念レポート(LGBM自動生成)、画像生成、画像ギャラリー、個人相談(スレッド往復)、ASCEND Ultra解放
+ 対象外: 投資シグナル、ASCEND Apex
+
+■ APEX：¥89,800/月
+ エンジン: Apex / 全19モード対応
+ 利用可能: 全機能解放、AIチャット(全19モード)、ファイル診断、固定概念レポート、投資シグナル(全銘柄)、ASCEND Apex(最上位AIエンジン)、個人相談、画像生成、ギャラリー、診断タブ全8種(投資シグナルタブ含む)
+
+■ ULTRA：¥300,000/月〜（要相談・顧問契約）
+ エンジン: Apex / 全19モード対応
+ 利用可能: ASCEND全機能完全解放、Ys Consulting Office顧問契約付き、社員10名まで個別アカウント発行、企業テナント共有(RAG・診断履歴)、月次戦術レポート提出、新機能先行利用、月次ミーティング・直接支援
+ 契約・問い合わせ: Ys Consulting Officeに直接連絡（UID記載必須）"""
+
+def _load_tenant_system_prompt(tenant_id: str, uid: str = "") -> str:
+    tenant_prompt = DEFAULT_SYSTEM_PROMPT
     try:
         db = get_db()
-        # app.py の sys_col() = db.collection("tenant_settings")
         doc = db.collection("tenant_settings").document(tenant_id).get()
         if doc.exists:
             sp = (doc.to_dict() or {}).get("system_prompt", "")
             if sp:
-                return sp
+                tenant_prompt = sp
     except Exception:
         pass
-    return DEFAULT_SYSTEM_PROMPT
+    if not uid:
+        return tenant_prompt
+    try:
+        db = get_db()
+        u_snap = db.collection("users").document(uid).get()
+        if u_snap.exists:
+            u = u_snap.to_dict() or {}
+            custom = (u.get("custom_sys_prompt") or "").strip()
+            mode = (u.get("custom_prompt_mode") or "append").strip()
+            if custom:
+                if mode == "replace":
+                    return custom + PLAN_DEFINITION if False else custom
+                else:
+                    return tenant_prompt + "\n\n" + custom
+    except Exception:
+        pass
+    return tenant_prompt
 
-def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str):
+def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: str = ""):
     """returns (prompt_str, chunks_list)"""
     try:
         chunks = rag_retrieve_chunks(tenant_id=tenant_id, query=query, top_k=5)
+        if uid:
+            try:
+                user_chunks = rag_retrieve_chunks(tenant_id=f"user__{uid}", query=query, top_k=15)
+                existing_ids = {c.get("chunk_id") for c in chunks}
+                chunks = chunks + [c for c in user_chunks if c.get("chunk_id") not in existing_ids]
+            except Exception:
+                pass
         if chunks:
             rag_text = "\n\n---\n\n".join(
                 f"【ナレッジ: {c.get('title', '')}】\n{c.get('text', '')}"
                 for c in chunks
             )
-            return f"{system_prompt}\n\n【参照ナレッジ】\n{rag_text}", chunks
+            # 問いの型判定: 知識・定義・方法系 → RAG即答優先 / 感情・相談系 → カスタム優先
+            import re as _re_qt
+            _knowledge_patterns = [
+                r"とは[？?]?$", r"するには[？?]?$", r"の方法", r"教えて", r"について",
+                r"どうやって", r"手順", r"やり方", r"コツ", r"ポイント",
+                r"の行動", r"直結", r"上げるには", r"向上させる", r"改善",
+                r"とは何", r"とはどういう", r"の意味", r"の定義",
+                r"チェックリスト", r"一覧", r"リスト", r"全問", r"評価",
+                r"学べる", r"ここで学", r"項目", r"ランキング", r"比較",
+            ]
+            _is_knowledge_query = any(
+                _re_qt.search(p, query) for p in _knowledge_patterns
+            )
+            if _is_knowledge_query:
+                return (
+                    f"【知識回答モード】以下の複数の参照ナレッジを統合して質問に答えよ。"
+                    f"各ナレッジの具体的な内容・事例・表現を活かし、抽象的・一般論的な回答は禁止。"
+                    f"キャラクターの口調・絵文字を維持しながら説得力ある具体的な回答をせよ。問いかけ返し・感情確認禁止。"
+                    f"【出力形式】比較・チェックリスト・一覧・評価項目を含む場合は必ずMarkdown表で出力せよ。"
+                    f"Markdown表のセパレーター行は | --- | --- | 形式のみ（:や=や-の4つ以上連続は禁止）。"
+                    f"重要ポイントは**太字**で強調せよ。\n\n"
+                    f"【参照ナレッジ({len(chunks)}件)】\n{rag_text}\n\n{system_prompt}"
+                ), chunks
+            else:
+                return f"{system_prompt}\n\n【参照ナレッジ】\n{rag_text}", chunks
     except Exception:
         pass
     return system_prompt, []
@@ -223,16 +328,33 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     history = _load_history(tenant_id, uid, chat_id)
     messages = history + [{"role": "user", "content": req.message}]
 
-    base_prompt   = _load_tenant_system_prompt(tenant_id)
-
-    # 脳内カルテ更新（相談モードのみ・バックグラウンドスレッドで実行）
+    base_prompt   = _load_tenant_system_prompt(tenant_id, uid=uid)
+    # chat_mode / is_talk を先に確定
     chat_mode = (req.chat_mode or "consult").strip().lower()
     is_talk = chat_mode == "talk"
+
+
+    # ── カスタムプロンプトモード判定 ────────────────────────────────
+    # replaceモード = 専用ボットモード（LENS/PURPOSE/脳内カルテ全スキップ）
+    _is_custom_replace = False
+    try:
+        _mode_doc = get_db().collection("users").document(uid).get()
+        if _mode_doc.exists:
+            _md = _mode_doc.to_dict() or {}
+            _has_custom = bool(_md.get("custom_sys_prompt", ""))
+            _is_replace_mode = _md.get("custom_prompt_mode", "append") == "replace"
+            # replaceモード + 会話モード → 専用ボット動作（コンサル指示全スキップ）
+            # replaceモード + 相談モード → カスタム+コンサルAI（スキップしない）
+            _is_custom_replace = _has_custom and _is_replace_mode and is_talk
+    except Exception:
+        pass
+
+    # 脳内カルテ更新（相談モードのみ・専用ボットモード以外）
     intent_state = {}
     import threading as _threading
     _intent_result = {}
     _intent_thread = None
-    if not is_talk:
+    if not is_talk and not _is_custom_replace:
         def _run_intent():
             try:
                 _intent_result["state"] = update_user_intent_state(uid, tenant_id, history, req.message)
@@ -241,26 +363,28 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         _intent_thread = _threading.Thread(target=_run_intent, daemon=True)
         _intent_thread.start()
 
-    # QueryPlan生成（相談モードのみ）
+    # QueryPlan生成（相談モードのみ・専用ボットモード以外）
     query_plan = {}
-    if not is_talk:
+    if not is_talk and not _is_custom_replace:
         try:
             query_plan = generate_query_plan(req.message, tenant_id, "mixed")
         except Exception:
             pass
-    # SummaryLens選択（query_planの結果を優先）
-    try:
-        lens_preset, lens_hier = lgbm_select_summary_lens(req.message, "auto")
-    except Exception:
-        lens_preset, lens_hier = "expert", "raw"
-    if query_plan.get("summary_lens", {}).get("preset"):
-        lens_preset = query_plan["summary_lens"]["preset"]
+    # SummaryLens選択（専用ボットモード以外）
+    lens_preset, lens_hier = "expert", "raw"
+    if not _is_custom_replace:
+        try:
+            lens_preset, lens_hier = lgbm_select_summary_lens(req.message, "auto")
+        except Exception:
+            lens_preset, lens_hier = "expert", "raw"
+        if query_plan.get("summary_lens", {}).get("preset"):
+            lens_preset = query_plan["summary_lens"]["preset"]
 
-    # 脳内カルテをsystem_promptに注入
+    # 脳内カルテをsystem_promptに注入（専用ボットモード以外）
     if _intent_thread: _intent_thread.join(timeout=0.0)
-    intent_state = _intent_result.get("state", {})
+    intent_state = _intent_result.get("state", {}) if not _is_custom_replace else {}
     intent_ctx = ""
-    if intent_state:
+    if intent_state and not _is_custom_replace:
         intent_ctx = f"""\n\n【ユーザーの脳内カルテ（深層プロファイル）】
 ・ステージ: {intent_state.get('current_stage','')}
 ・真の渇望: {intent_state.get('true_desire','')}
@@ -269,15 +393,63 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 ※上記を踏まえ、単なる回答ではなく「格を上げるための介入」を行え。"""
 
     if not is_talk:
-        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt)
+        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt, uid=payload.get("uid",""))
     else:
         system_prompt, _rag_chunks = base_prompt, []
-        # 会話モード：コンサル形式の出力指示を上書き
-        system_prompt = system_prompt.replace(
-            "出力形式：結論→打ち手→優先順位→リスク→次の観測。",
-            "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ。"
-        ) + "\n\n【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"
+        # 会話モード：カスタムプロンプトがある場合はRAG+URL注入を発動
+        try:
+            _talk_user_doc = get_db().collection("users").document(uid).get()
+            _talk_has_custom = bool((_talk_user_doc.to_dict() or {}).get("custom_sys_prompt", "")) if _talk_user_doc.exists else False
+        except Exception:
+            _talk_has_custom = False
+        if _talk_has_custom:
+            # 会話モード: カスタムプロンプトのみをベースにRAG知識を注入（形式模倣防止）
+            _talk_custom_only = ((_talk_user_doc.to_dict() or {}).get("custom_sys_prompt") or "").strip()
+            _talk_base = _talk_custom_only if (_talk_custom_only and not _is_custom_replace) else base_prompt
+            system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, _talk_base, uid=uid)
+        if _talk_has_custom and not _is_custom_replace:
+            system_prompt = (
+                "【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を背景知識として使い、"
+                "質問に対して3〜5文の自然な会話口調で直接答えよ。"
+                "知識ファイルの番号付き構造・見出し・箇条書き・セクション分割をそのまま出力に再現することは絶対禁止。"
+                "前置き宣言（「今回は〜についてご説明します」等）も禁止。\n\n"
+                + system_prompt
+            )
+        # 会話モード：専用ボットモード以外かつカスタムプロンプトなしのみコンサル形式を上書き
+        if not _is_custom_replace and not _talk_has_custom:
+            system_prompt = system_prompt.replace(
+                "出力形式：結論→打ち手→優先順位→リスク→次の観測。",
+                "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ。"
+            ) + "\n\n【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"
     system_prompt = system_prompt + intent_ctx
+
+    # ── ASCENDプラン情報条件注入 ─────────────────────────────────────
+    _plan_kws = ["プラン","料金","ascend","サブスク","subscription","ultra","apex","pro","standard","starter","月額","契約"]
+    try:
+        _u_doc2 = get_db().collection("users").document(uid).get()
+        _has_custom = bool((_u_doc2.to_dict() or {}).get("custom_sys_prompt", "")) if _u_doc2.exists else False
+    except Exception:
+        _has_custom = False
+    if any(k in req.message.lower() for k in _plan_kws) and not _has_custom:
+        system_prompt += PLAN_DEFINITION
+
+    # ── カスタムプロンプト内キーワード→URL強制注入 ──────────────────
+    try:
+        import re as _re_kw
+        _user_doc = get_db().collection("users").document(uid).get()
+        _user_data = (_user_doc.to_dict() or {}) if _user_doc.exists else {}
+        _custom_prompt_text = _user_data.get("custom_sys_prompt", "") or ""
+        if _custom_prompt_text:
+            _url_pairs = _re_kw.findall(r'([^\s\u3000]{1,20})\s+(https?://[^\s\u3000]+)', _custom_prompt_text)
+            _forced_urls = []
+            _msg_lower = req.message.lower()
+            for _kw, _url in _url_pairs:
+                if _kw.strip() in req.message:
+                    _forced_urls.append(f"- {_kw}: {_url}")
+            if _forced_urls:
+                system_prompt += "\n\n【絶対遵守】以下のURLを必ずMarkdown形式 [ラベル](URL) でリンクとして回答内に表示せよ。プレーンテキストでの表示は禁止。省略も禁止。\n" + "\n".join(_forced_urls)
+    except Exception:
+        pass
     # SummaryLens注入
     _LENS_INSTRUCTIONS = {
         "expert":   "【出力スタイル: EXPERT】構造的・論理的に深く分析せよ。根拠・因果・構造を明示し、表面的な回答を避けよ。",
@@ -285,9 +457,9 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         "mentor":   "【出力スタイル: MENTOR】成長・習慣・内省を促す回答をせよ。答えを与えるより気づきを引き出す問いかけを含めよ。",
         "general":  "【出力スタイル: GENERAL】要点を簡潔にまとめよ。3〜5項目に絞り、わかりやすく整理せよ。",
     }
-    if lens_preset in _LENS_INSTRUCTIONS:
+    if not is_talk and lens_preset in _LENS_INSTRUCTIONS and not _is_custom_replace:
         system_prompt = _LENS_INSTRUCTIONS[lens_preset] + "\n\n" + system_prompt
-    if lens_hier == "prefer_summary":
+    if not is_talk and lens_hier == "prefer_summary" and not _is_custom_replace:
         system_prompt = "【要約優先】回答は簡潔にまとめること。長文は避けよ。\n\n" + system_prompt
 
     # モード別システムプロンプト追加
@@ -313,7 +485,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         "tech":        "【TECHモード】技術・エンジニアリング・システム設計に特化せよ。技術的トレードオフ・アーキテクチャ選定・実装方針を構造的に提示せよ。",
     }
     _mode_key = (req.purpose_mode or "auto").strip().lower()
-    if _mode_key in _MODE_INSTRUCTIONS:
+    if not is_talk and _mode_key in _MODE_INSTRUCTIONS and not _is_custom_replace:
         system_prompt = _MODE_INSTRUCTIONS[_mode_key] + "\n\n" + system_prompt
     # FINANCEモード時: Firestoreの実シグナルデータを注入
     if _mode_key == "finance":
@@ -481,38 +653,44 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     if not generated_images and _is_consulting:
         try:
             import json as _json_s, re as _re_s
+            _mode_upper = _mode_key.upper() if _mode_key != "auto" else ""
+            _mode_line = f"modeは必ず {_mode_upper} で固定（変更禁止）\n" if _mode_upper else "modeは問いの内容に応じてSTRATEGY/NUMERIC/DIAGNOSIS/PLANNING/RISK/MARKETING/FINANCE/HRから選択\n"
             _sp = (
-                "次のJSONキー構造のみで回答せよ。他のキー名・構造は絶対禁止。前置き禁止。コードブロック禁止。\n"
-                "必須キー: summary, cards, analysis, actions, value_message\n"
-                "cards必須キー: current, risk, plan (各5件の文字列配列・各項目は具体的数値・固有名詞・根拠を含む20字以上)\n"
+                "問いの型を判定し最適なカード構成でJSONのみ出力せよ。前置き・後置き・コードブロック絶対禁止。\n"
+                "【問いの型と対応カード（必ずこの分類に従え）】\n"
+                "action（行動定義型: 〜するには？〜の行動は？〜すべきことは？）→ cards:[即実行アクション, 阻害要因・注意点, 優先順位・判断基準]\n"
+                "analysis（現状分析型: 〜の問題は？〜を分析して、〜の原因は？）→ cards:[現状整理, 問題・リスク, 推奨方針]\n"
+                "forecast（予測型: 〜どうなる？〜の見通しは？〜のシナリオは？）→ cards:[楽観シナリオ, 悲観シナリオ, 対策・備え]\n"
+                "decision（意思決定型: 〜すべき？〜AかBか？〜の選択は？）→ cards:[メリット・根拠, リスク・代償, 推奨判断]\n"
+                "definition（定義・説明型: 〜とは？〜の意味は？〜の仕組みは？）→ cards:[本質・定義, 構造分解, 実装・応用]\n"
+                "必須キー: summary, question_type, cards, analysis, actions, value_message\n"
+                "question_type: action/analysis/forecast/decision/definition のいずれか\n"
+                "cards: 3要素の配列。各要素は {title:string, items:string[]} 形式。itemsは5件\n"
+                "itemsはユーザーが提示した実情報を元に具体的に記述。情報不足時は仮説と明記。架空数値捏造絶対禁止\n"
                 "analysis必須キー: type, urgency, importance, mode\n"
-                "urgency/importanceは必ず '高'/'中'/'低' のいずれか\n"
-                + (f"modeは必ず {_mode_key.upper()} で固定せよ（変更禁止）\n" if _mode_key != "auto" else "modeは必ず STRATEGY/NUMERIC/CONTROL/RISK/MARKETING/GROWTH/DIAGNOSIS/PLANNING/FINANCE/HR/CREATIVE/NEGOTIATION/AUTO のいずれか\n")
-                + "summary: 根拠・数値・結論を含む2〜3行で記述せよ\n"
-                "cards.current: 現状・事実・観測データを具体的に5件（一般論禁止・数値引用必須）\n"
-                "cards.risk: 問題・リスク・ボトルネックを因果関係付きで5件\n"
-                "cards.plan: 即実行可能な具体的施策を優先度順に5件（担当・期限・KPIを含む）\n"
-                "actions: 次に取るべき具体的アクションを3件\n"
-                f"\n【直近の会話履歴（最新3件）】\n" + "\n".join([f"{m['role']}: {str(m.get('content',''))[:150]}" for m in messages[-4:-1]]) + "\n\n"
-                f"【今回の相談】: {req.message[:400]}\n"
+                "urgency/importanceは 高/中/低 のいずれか\n"
+                + _mode_line
+                + f"\n【今回の相談】: {req.message[:400]}\n"
                 f"【今回の回答要約】: {reply[:800]}\n"
-                + (f"【投資シグナル実データ】: {system_prompt[-1500:]}\n実データにない数値・指標（RSI/MACD/移動平均等）は絶対に捏造するな。\n" if _mode_key == "finance" else "")
-                + "\n出力例(この形式厳守):\n"
-                '{"summary":"売上15%減の根本原因は新規獲得コスト増加と離脱率上昇の複合要因。即時対処が必要。","cards":{"current":["新規獲得単価が前月比23%増加し収益を圧迫","リピート率が62%→54%に低下、離脱が加速","競合A社が価格15%引下げで顧客を奪取中","SNS広告ROIが1.8→1.2に悪化、費用対効果低下","スタッフ稼働率が87%で限界近く追加施策の余力なし"],"risk":["獲得コスト増加が継続すると3ヶ月で赤字転落","リピート離脱が止まらず既存顧客基盤が崩壊リスク","競合の価格攻勢に対抗できず市場シェア喪失","現状の広告依存構造では利益率改善が不可能","スタッフ疲弊による品質低下でさらなる離脱を招く懸念"],"plan":["離脱顧客への復帰DM施策を今週中に実施（目標: 復帰率10%）","SNS広告をROI1.5以上の媒体に集中し無駄を即カット","紹介制度導入で獲得コストを現状比30%削減を目指す","リピート特典の見直しで来店頻度を月1→月1.5回に引上げ","スタッフ1名採用検討で稼働率を80%以下に正常化"]},"analysis":{"type":"構造分析","urgency":"高","importance":"高","mode":"DIAGNOSIS"},"actions":["離脱顧客リストを今週中に抽出する","SNS広告のROI計測を媒体別に即開始する","競合価格調査を実施して差別化軸を再定義する"],"value_message":"売上減の構造的原因を特定し、即実行可能な優先施策を提示。"}'
+                + (f"【投資シグナル実データ】: {system_prompt[-1500:]}\n実データにない指標は絶対捏造禁止。\n" if _mode_key == "finance" else "")
+                + '\n出力例(action型):\n{"summary":"売上に直結する行動の本質は客数×客単価の2軸を動かす即実行アクション。","question_type":"action","cards":[{"title":"即実行アクション","items":["初回接触でその場で次回予約を取る","入室5分以内にオプション前提の空気を作る","接客終了前に再来理由を言語化して渡す","LINE/DMで24時間以内に再接触する","無言時間を作らず滞在満足度を最大化する"]},{"title":"阻害要因・注意点","items":["予約を取らずに終わらせる習慣","オプション提案のタイミングが遅い","再来理由を渡さずお客様任せにしている","接触頻度が低く関係性が薄れている","選択肢を多く出しすぎて迷わせている"]},{"title":"優先順位・判断基準","items":["まず次回予約率を計測する","オプション提案率を記録する","24時間以内フォロー率を追う","リピート間隔を短縮できているか確認","客単価の変化を週次でモニタリング"]}],"analysis":{"type":"行動定義","urgency":"高","importance":"高","mode":"STRATEGY"},"actions":["今日の接客で次回予約を必ず取る","オプション提案タイミングを入室5分以内に固定する","接客後24時間以内のフォローを仕組み化する"],"value_message":"売上に直結する行動は次の金を今日決めさせる3つだけ。"}'
             )
             _sr = call_llm(
                 system_prompt="JSONのみ出力。指定キー構造厳守。前置き・後置き・コードブロック完全禁止。余計なキー追加禁止。",
                 messages=[{"role": "user", "content": _sp}],
-                ai_tier="core", max_tokens=700
+                ai_tier="core", max_tokens=900
             )
             _m = _re_s.search(r'\{.*\}', _sr, _re_s.DOTALL)
             if _m:
                 _parsed = _json_s.loads(_m.group(0))
-                # 必須キー検証
                 if all(k in _parsed for k in ["summary","cards","analysis","actions","value_message"]):
-                    _cards = _parsed.get("cards", {})
                     _analysis = _parsed.get("analysis", {})
-                    if all(k in _cards for k in ["current","risk","plan"]) and all(k in _analysis for k in ["type","urgency","importance","mode"]):
+                    _cards = _parsed.get("cards")
+                    _cards_ok = (
+                        (isinstance(_cards, list) and len(_cards) >= 2 and all("title" in c and "items" in c for c in _cards))
+                        or (isinstance(_cards, dict) and any(k in _cards for k in ["current","risk","plan"]))
+                    )
+                    if _cards_ok and all(k in _analysis for k in ["type","urgency","importance","mode"]):
                         structured = _parsed
         except Exception as _se:
             structured = None
@@ -1055,7 +1233,7 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
     # 画像が添付されている場合は解析モード（生成ではなく分析）
     if req.image_b64:
         try:
-            base_prompt = _load_tenant_system_prompt(tenant_id)
+            base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
             system_prompt = (
                 "【最重要指示】あなたは画像解析AIです。添付された画像を必ず詳細に分析し、"
                 "内容・テキスト・数値・構造・色・特徴を全て日本語で説明してください。"
@@ -1147,7 +1325,7 @@ def send_file(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
     chat_id = (req.chat_id or "main").strip() or "main"
     _ensure_session(tenant_id, uid, chat_id)
-    base_prompt = _load_tenant_system_prompt(tenant_id)
+    base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
     _consulting_core = """あなたは超一流の経営コンサルタントであり、データ分析の専門家である。
 添付されたファイルの内容を必ず詳細に分析し、以下の観点でコンサルティング回答を提供せよ。
 
@@ -1366,3 +1544,4 @@ def delete_image(image_id: str, payload: dict = Depends(verify_token)):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+# DEBUG REMOVE LATER
