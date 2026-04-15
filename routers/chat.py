@@ -164,6 +164,21 @@ def _update_level_score(tenant_id: str, uid: str, delta: int):
         pass
 
 def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: str, cases: list = None, structured: dict = None, images: list = None):
+    if not content or not content.strip():
+        return
+    # Markdown表の余分なスペースパディングを正規化
+    import re as _re_norm
+    def _normalize_table(s: str) -> str:
+        lines = s.split("\n")
+        normalized = []
+        for line in lines:
+            if "|" in line:
+                cells = line.split("|")
+                cells = [c.strip() for c in cells]
+                line = "|".join(cells)
+            normalized.append(line)
+        return "\n".join(normalized)
+    content = _normalize_table(content)
     ref = _messages_ref(tenant_id, uid, chat_id)
     doc = {
         "role":    role,
@@ -184,7 +199,10 @@ def _load_history(tenant_id: str, uid: str, chat_id: str = "main", limit: int = 
     result = []
     for d in docs:
         data = d.to_dict() or {}
-        msg = {"role": data.get("role", "user"), "content": data.get("content", "")}
+        content = data.get("content", "")
+        if not content or not content.strip():
+            continue
+        msg = {"role": data.get("role", "user"), "content": content}
         if data.get("cases"):
             msg["cases"] = data["cases"]
         if data.get("structured"):
@@ -240,8 +258,38 @@ def _load_tenant_system_prompt(tenant_id: str, uid: str = "") -> str:
         u_snap = db.collection("users").document(uid).get()
         if u_snap.exists:
             u = u_snap.to_dict() or {}
+            plan = (u.get("plan") or "user").strip()
             custom = (u.get("custom_sys_prompt") or "").strip()
             mode = (u.get("custom_prompt_mode") or "append").strip()
+            member_extra = (u.get("member_extra_prompt") or "").strip()
+            # ultra_member: use_admin_settings=Trueの時のみadmin設定をベースに追加
+            if plan == "ultra_member" and tenant_id and u.get("use_admin_settings", False):
+                try:
+                    admin_docs = list(
+                        db.collection("users")
+                        .where("tenant_id", "==", tenant_id)
+                        .limit(20)
+                        .stream()
+                    )
+                    admin_custom = ""
+                    admin_mode = "append"
+                    for ad in admin_docs:
+                        ad_data = ad.to_dict() or {}
+                        if ad_data.get("plan") == "ultra_admin" or ad_data.get("role") == "ultra_admin":
+                            admin_custom = (ad_data.get("custom_sys_prompt") or "").strip()
+                            admin_mode = (ad_data.get("custom_prompt_mode") or "append").strip()
+                            break
+                    if admin_custom:
+                        if admin_mode == "replace":
+                            tenant_prompt = admin_custom
+                        else:
+                            tenant_prompt = tenant_prompt + "\n\n" + admin_custom
+                except Exception:
+                    pass
+                # メンバー独自追加指示を追記
+                if member_extra:
+                    tenant_prompt = tenant_prompt + "\n\n" + member_extra
+                return tenant_prompt
             if custom:
                 if mode == "replace":
                     return custom + PLAN_DEFINITION if False else custom
@@ -251,10 +299,17 @@ def _load_tenant_system_prompt(tenant_id: str, uid: str = "") -> str:
         pass
     return tenant_prompt
 
-def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: str = ""):
+def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: str = "", admin_uid: str = ""):
     """returns (prompt_str, chunks_list)"""
     try:
         chunks = rag_retrieve_chunks(tenant_id=tenant_id, query=query, top_k=5)
+        if admin_uid:
+            try:
+                admin_chunks = rag_retrieve_chunks(tenant_id=f"user__{admin_uid}", query=query, top_k=10)
+                existing_ids = {c.get("chunk_id") for c in chunks}
+                chunks = chunks + [c for c in admin_chunks if c.get("chunk_id") not in existing_ids]
+            except Exception:
+                pass
         if uid:
             try:
                 user_chunks = rag_retrieve_chunks(tenant_id=f"user__{uid}", query=query, top_k=15)
@@ -264,8 +319,8 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: 
                 pass
         if chunks:
             rag_text = "\n\n---\n\n".join(
-                f"【ナレッジ: {c.get('title', '')}】\n{c.get('text', '')}"
-                for c in chunks
+                f"【ナレッジ: {c.get('title', '')}】\n{c.get('text', '')[:1500]}"
+                for c in chunks[:10]
             )
             # 問いの型判定: 知識・定義・方法系 → RAG即答優先 / 感情・相談系 → カスタム優先
             import re as _re_qt
@@ -392,8 +447,21 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 ・不足観点: {intent_state.get('missing_piece','')}
 ※上記を踏まえ、単なる回答ではなく「格を上げるための介入」を行え。"""
 
+    # ultra_member+use_admin_settings=True時に管理者のuidを取得
+    _admin_uid = ""
+    try:
+        _u_data = get_db().collection("users").document(uid).get().to_dict() or {}
+        if _u_data.get("plan") == "ultra_member" and _u_data.get("use_admin_settings", False):
+            _admin_docs = list(get_db().collection("users").where("tenant_id","==",tenant_id).limit(20).stream())
+            for _ad in _admin_docs:
+                _ad_data = _ad.to_dict() or {}
+                if _ad_data.get("plan") == "ultra_admin":
+                    _admin_uid = _ad.id
+                    break
+    except Exception:
+        pass
     if not is_talk:
-        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt, uid=payload.get("uid",""))
+        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt, uid=payload.get("uid",""), admin_uid=_admin_uid)
     else:
         system_prompt, _rag_chunks = base_prompt, []
         # 会話モード：カスタムプロンプトがある場合はRAG+URL注入を発動
@@ -402,11 +470,12 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
             _talk_has_custom = bool((_talk_user_doc.to_dict() or {}).get("custom_sys_prompt", "")) if _talk_user_doc.exists else False
         except Exception:
             _talk_has_custom = False
-        if _talk_has_custom:
+        _talk_has_admin_rag = bool(_admin_uid)
+        if _talk_has_custom or _talk_has_admin_rag:
             # 会話モード: カスタムプロンプトのみをベースにRAG知識を注入（形式模倣防止）
             _talk_custom_only = ((_talk_user_doc.to_dict() or {}).get("custom_sys_prompt") or "").strip()
             _talk_base = _talk_custom_only if (_talk_custom_only and not _is_custom_replace) else base_prompt
-            system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, _talk_base, uid=uid)
+            system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, _talk_base, uid=uid, admin_uid=_admin_uid)
         if _talk_has_custom and not _is_custom_replace:
             system_prompt = (
                 "【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を背景知識として使い、"

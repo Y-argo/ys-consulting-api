@@ -1080,8 +1080,10 @@ def get_user_ai_settings(payload: dict = Depends(verify_token)):
     snap = db.collection("users").document(uid).get()
     d = (snap.to_dict() or {}) if snap.exists else {}
     return {
-        "ai_description":       d.get("ai_description", ""),
+        "ai_description":        d.get("ai_description", ""),
         "conversation_starters": d.get("conversation_starters", []),
+        "use_admin_settings":    d.get("use_admin_settings", False),
+        "member_extra_prompt":   d.get("member_extra_prompt", ""),
     }
 
 @router.post("/user_ai_settings")
@@ -1095,9 +1097,45 @@ def save_user_ai_settings(body: dict = Body(...), payload: dict = Depends(verify
     db.collection("users").document(uid).set({
         "ai_description":        (body.get("ai_description") or "").strip(),
         "conversation_starters": [s.strip() for s in (body.get("conversation_starters") or []) if s.strip()][:4],
+        "use_admin_settings":    bool(body.get("use_admin_settings", False)),
+        "member_extra_prompt":   (body.get("member_extra_prompt") or "").strip(),
         "updated_at":            fs.SERVER_TIMESTAMP,
     }, merge=True)
     return {"ok": True}
+
+@router.get("/admin_ai_settings")
+def get_admin_ai_settings(payload: dict = Depends(verify_token)):
+    """同テナントのultra_adminのAI設定を返す（ultra_member専用）"""
+    uid = payload.get("uid", "")
+    tenant_id = payload.get("tenant_id", "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    u_snap = db.collection("users").document(uid).get()
+    u_data = (u_snap.to_dict() or {}) if u_snap.exists else {}
+    plan = u_data.get("plan", "")
+    if plan != "ultra_member":
+        raise HTTPException(status_code=403, detail="ultra_memberのみ利用可能")
+    tenant_id = u_data.get("tenant_id", tenant_id)
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id必須")
+    try:
+        admin_docs = list(
+            db.collection("users")
+            .where("tenant_id", "==", tenant_id)
+            .limit(20)
+            .stream()
+        )
+        for ad in admin_docs:
+            ad_data = ad.to_dict() or {}
+            if ad_data.get("plan") == "ultra_admin":
+                return {
+                    "ai_description":        ad_data.get("ai_description", ""),
+                    "conversation_starters": ad_data.get("conversation_starters", []),
+                }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ai_description": "", "conversation_starters": []}
 
 @router.get("/user_knowledge_list")
 def get_user_knowledge_list(payload: dict = Depends(verify_token)):
