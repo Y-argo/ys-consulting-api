@@ -1146,7 +1146,7 @@ def get_user_knowledge_list(payload: dict = Depends(verify_token)):
     db = get_db()
     user_tenant = f"user__{uid}"
     try:
-        links = list(db.collection("tenant_source_links").where("tenant_id", "==", user_tenant).limit(50).stream())
+        links = list(db.collection("tenant_source_links").where("tenant_id", "==", user_tenant).limit(60).stream())
         result = []
         for lnk in links:
             ld = lnk.to_dict() or {}
@@ -1154,6 +1154,8 @@ def get_user_knowledge_list(payload: dict = Depends(verify_token)):
                 "source_id": ld.get("source_id", ""),
                 "title":     ld.get("title", ""),
                 "link_id":   lnk.id,
+                "chunks":    ld.get("chunks", 0),
+                "summaries": ld.get("summaries", 0),
             })
         return {"files": result}
     except Exception as e:
@@ -1223,18 +1225,28 @@ async def upload_user_knowledge(
             pass
 
     source_id = f"user__{uid}__{fname}"
+    # 同一ファイル名の重複チェック
+    existing_link = db.collection("tenant_source_links").document(f"{user_tenant}__{fname}").get()
+    if existing_link.exists:
+        raise HTTPException(status_code=409, detail=f"同じファイル名（{fname}）は既にアップロード済みです。削除してから再度アップロードしてください。")
+    # 全角スペース・連続スペース・連続改行を正規化
+    import re as _re_clean
+    text = text.replace("　", " ")
+    text = _re_clean.sub(r"\n{3,}", "\n\n", text).strip()
+    text = _re_clean.sub(r" {2,}", " ", text)
+
     chunk_size = 800
     chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     db.collection("sources").document(source_id).set({
         "source_id":   source_id,
         "title":       fname,
-        "content":     text[:2000],
+        "content":     text[:12000],
         "category":    "ユーザー知識",
         "source_type": "file",
         "created_at":  fs.SERVER_TIMESTAMP,
         "updated_at":  fs.SERVER_TIMESTAMP,
     }, merge=True)
-    link_id = f"{user_tenant}__{source_id}"
+    link_id = f"{user_tenant}__{fname}"
     db.collection("tenant_source_links").document(link_id).set({
         "tenant_id":   user_tenant,
         "source_id":   source_id,
@@ -1246,7 +1258,7 @@ async def upload_user_knowledge(
         "updated_at":  fs.SERVER_TIMESTAMP,
     }, merge=True)
     wrote = 0
-    for ci, chunk in enumerate(chunks[:10]):
+    for ci, chunk in enumerate(chunks):  # 全チャンク処理（上限撤廃）
         if not chunk.strip():
             continue
         try:
@@ -1264,9 +1276,53 @@ async def upload_user_knowledge(
                 "chunk_index": ci,
             }, merge=True)
             wrote += 1
-        except Exception:
-            pass
-    return {"ok": True, "source_id": source_id, "chunks": wrote}
+        except Exception as _chunk_e:
+            print(f"[CHUNK ERROR] {_chunk_e}", flush=True)
+    # サマリー生成・保存
+    summaries_wrote = 0
+    try:
+        from api.core.llm_client import call_llm as _call_llm
+        _section_size = 10000
+        _sections = [text[i:i+_section_size] for i in range(0, len(text), _section_size)]
+        for _si, _section in enumerate(_sections):
+            if not _section.strip():
+                continue
+            try:
+                _summary_prompt = (
+                    f"以下のファイルのセクション{_si+1}/{len(_sections)}を300字以内で要約せよ。"
+                    f"主要論点・固有名詞・数値・結論を漏らさず含めよ。抽象的表現禁止。\n\n"
+                    f"ファイル名: {fname}\n\n{_section}"
+                )
+                _summary_text = _call_llm(
+                    system_prompt="要約のみ出力。前置き・後置き禁止。",
+                    messages=[{"role": "user", "content": _summary_prompt}],
+                    ai_tier="core",
+                    max_tokens=500,
+                )
+                if _summary_text:
+                    _summary_id = f"{source_id}__summary__{_si}"
+                    _semb = _embed_text(_summary_text)
+                    db.collection("source_chunks").document(_summary_id).set({
+                        "chunk_id":    _summary_id,
+                        "doc_id":      source_id,
+                        "source_id":   source_id,
+                        "title":       fname,
+                        "text":        _summary_text,
+                        "embedding":   _semb,
+                        "category":    "ユーザー知識",
+                        "source_type": "summary",
+                        "chunk_index": -1 - _si,
+                    }, merge=True)
+                    summaries_wrote += 1
+            except Exception as _sum_e:
+                print(f"[SUMMARY ERROR] section={_si} {_sum_e}", flush=True)
+    except Exception as _sum_outer_e:
+        print(f"[SUMMARY OUTER ERROR] {_sum_outer_e}", flush=True)
+    db.collection("tenant_source_links").document(link_id).set({
+        "chunks": wrote,
+        "summaries": summaries_wrote,
+    }, merge=True)
+    return {"ok": True, "source_id": source_id, "chunks": wrote, "summaries": summaries_wrote}
 
 @router.delete("/user_knowledge/{source_id:path}")
 def delete_user_knowledge(source_id: str, payload: dict = Depends(verify_token)):
@@ -1276,12 +1332,17 @@ def delete_user_knowledge(source_id: str, payload: dict = Depends(verify_token))
         raise HTTPException(status_code=401, detail="uid必須")
     db = get_db()
     user_tenant = f"user__{uid}"
-    link_id = f"{user_tenant}__{source_id}"
+    link_id = source_id
     try:
         db.collection("tenant_source_links").document(link_id).delete()
-        old_chunks = list(db.collection("source_chunks").where("source_id", "==", source_id).limit(20).stream())
-        for c in old_chunks:
-            c.reference.delete()
+        db.collection("sources").document(source_id).delete()
+        # チャンクを全件削除（limit(20)ループ）
+        while True:
+            batch = list(db.collection("source_chunks").where("source_id", "==", source_id).limit(50).stream())
+            if not batch:
+                break
+            for c in batch:
+                c.reference.delete()
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

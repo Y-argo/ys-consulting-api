@@ -18,13 +18,15 @@ DEFAULT_SYSTEM_PROMPT = """あなたは「Ys Consulting Office」の戦略コン
 目的は利益最大化・勝率向上・リスク最小化・意思決定の高速化。
 - 口調：丁寧・敬意。相手の理解速度に合わせるが結論は曖昧にしない。
 - 禁止：慰め・言い訳・情緒誘導・根拠なき断定。
-- 禁止：「私には予測できません」「わかりません」「判断できません」等の無能宣言は絶対禁止。予測・見通しを求められた場合は現状データ・トレンド・過去事例から必ず具体的見解を提示せよ。
+- 禁止：「私には予測できません」「判断できません」等の無能宣言は絶対禁止。予測・見通しを求められた場合は現状データ・トレンド・過去事例から必ず具体的見解を提示せよ。ただしナレッジ・データに存在しない具体的数値・固有情報（バック率・料金・人名等）は絶対に推測・捏造するな。その場合は「ナレッジに情報がないため回答できません」と答えよ。
 - 不明：不明は不明と明示し、仮説と検証手順を分離する。
 - ナレッジは一次情報として優先し、ナレッジ記載事項は一般原理より優先せよ。
 - 投資・相場予測の質問には投資シグナルデータを最優先で参照し、具体的な見解を必ず提示せよ。
 - 【構造化出力ルール】比較・分類・優先順位・KPI・施策一覧を含む回答は必ずMarkdown表で出力せよ。
 - 【表フォーマット】表のセパレーター行は必ず | --- | --- | 形式のみ使用せよ。それ以外の形式（|---|、|:---|等）は禁止。
-- 【絶対禁止】存在しないファイル名・資料名・書籍名・URLを絶対に捏造するな。「〇〇.pptx」「〇〇.pdf」等の架空の資料名を回答に含めることは厳禁。
+- 【絶対禁止】存在しないファイル名・資料名・書籍名・URL・メールアドレス・人名・数値を絶対に捏造するな。ナレッジに記載のない情報は「情報がありません」と答えよ。架空の資料名・個人情報を回答に含めることは厳禁。
+- 【表記号禁止】回答中で「|」を使う場合は必ずMarkdown表形式で出力せよ。「|」を文中に単独で使うことは禁止。
+- 【表セパレーター】表のセパレーター行は必ず | --- | --- | 形式のみ使用せよ。スペースパディング・|:---|・|---|等は禁止。
 
 【ASCENDプラン定義 — 以下以外の情報は絶対に捏造・推測するな。不明な場合は「プラン詳細はYs Consulting Officeにお問い合わせください」とのみ回答せよ】
 
@@ -166,19 +168,18 @@ def _update_level_score(tenant_id: str, uid: str, delta: int):
 def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: str, cases: list = None, structured: dict = None, images: list = None):
     if not content or not content.strip():
         return
-    # Markdown表の余分なスペースパディングを正規化
-    import re as _re_norm
-    def _normalize_table(s: str) -> str:
-        lines = s.split("\n")
-        normalized = []
-        for line in lines:
-            if "|" in line:
-                cells = line.split("|")
-                cells = [c.strip() for c in cells]
-                line = "|".join(cells)
-            normalized.append(line)
-        return "\n".join(normalized)
-    content = _normalize_table(content)
+    # base64画像データをcontentから除去してから保存
+    if "__IMAGE_B64__" in content:
+        content = content[:content.index("__IMAGE_B64__")].rstrip()
+    if not content:
+        return
+    # スペースパディング除去（セル内連続スペースを1つに圧縮）
+    import re as _re
+    content = _re.sub(r" {2,}", " ", content)
+    content = content.strip()
+    if not content:
+        return
+
     ref = _messages_ref(tenant_id, uid, chat_id)
     doc = {
         "role":    role,
@@ -202,6 +203,9 @@ def _load_history(tenant_id: str, uid: str, chat_id: str = "main", limit: int = 
         content = data.get("content", "")
         if not content or not content.strip():
             continue
+        # 巨大スペースパディングメッセージを除外（正常な回答は5000文字以内）
+        if len(content) > 5000:
+            content = content[:5000]
         msg = {"role": data.get("role", "user"), "content": content}
         if data.get("cases"):
             msg["cases"] = data["cases"]
@@ -479,9 +483,10 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         if _talk_has_custom and not _is_custom_replace:
             system_prompt = (
                 "【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を背景知識として使い、"
-                "質問に対して3〜5文の自然な会話口調で直接答えよ。"
-                "知識ファイルの番号付き構造・見出し・箇条書き・セクション分割をそのまま出力に再現することは絶対禁止。"
-                "前置き宣言（「今回は〜についてご説明します」等）も禁止。\n\n"
+                "質問に対してキャラクターの口調で直接答えよ。"
+                "知識ファイルに表・一覧・チェックリストが含まれる場合は必ずMarkdown表で出力せよ。"
+                "それ以外は3〜5文の自然な会話口調で答えよ。"
+                "前置き宣言（「今回は〜についてご説明します」等）は禁止。\n\n"
                 + system_prompt
             )
         # 会話モード：専用ボットモード以外かつカスタムプロンプトなしのみコンサル形式を上書き
@@ -849,6 +854,22 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         except Exception:
             pass
 
+    # スペースパディング・セパレーター行正規化
+    def _clean_reply(s):
+        import re as _re
+        s = _re.sub(r" {2,}", " ", s)
+        lines = s.split("\n")
+        out = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("|") and stripped.endswith("|"):
+                inner = stripped[1:-1]
+                cells = inner.split("|")
+                if all(_re.match(r"^\s*:?-+:?\s*$", c) for c in cells if c.strip()):
+                    line = "|" + "|".join(" --- " for _ in cells) + "|"
+            out.append(line)
+        return "\n".join(out).strip()
+    reply = _clean_reply(reply)
     _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured, images=generated_images)
     # usage_logs に記録（total_chat_count 集計用）
     try:
@@ -1368,6 +1389,7 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
         except Exception:
             pass
     _save_message(tenant_id, uid, chat_id, "user", req.message)
+    reply = __import__("re").sub(r" {2,}", " ", reply).strip()
     _save_message(tenant_id, uid, chat_id, "assistant", reply, images=generated_images)
     # usage_log書き込み
     try:
@@ -1465,6 +1487,7 @@ def send_file(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
     except Exception:
         pass
     _save_message(tenant_id, uid, chat_id, "user", req.message)
+    reply = __import__("re").sub(r" {2,}", " ", reply).strip()
     _save_message(tenant_id, uid, chat_id, "assistant", reply, structured=_inv_structured)
     # usage_log書き込み
     try:
@@ -1572,6 +1595,7 @@ def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"投資解析エラー: {e}")
     _save_message(tenant_id, uid, chat_id, "user", req.message)
+    reply = __import__("re").sub(r" {2,}", " ", reply).strip()
     _save_message(tenant_id, uid, chat_id, "assistant", reply)
     # usage_log書き込み
     try:
