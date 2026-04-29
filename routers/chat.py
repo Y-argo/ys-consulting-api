@@ -2,6 +2,8 @@
 import datetime
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+import json as _json_sse
 from pydantic import BaseModel
 from typing import List, Optional
 from google.cloud import firestore as fs
@@ -14,7 +16,35 @@ from api.core.intent import update_user_intent_state, generate_query_plan, lgbm_
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-DEFAULT_SYSTEM_PROMPT = """あなたは「Ys Consulting Office」の戦略コンサルタント（LM）である。
+def _clean_reply(text: str) -> str:
+    """Markdownテーブルのセパレーター正規化・スペース圧縮・英語instruction除去"""
+    import re as _re
+    # 英語instructionハルシネーション除去
+    _en_kws = ["identify the issue as a question", "Okay, I understand. Please provide",
+               "I will then:", "Identify the main issue", "Answer the question based on",
+               "framing it as a question"]
+    lines = text.split("\n")
+    text = "\n".join(l for l in lines if not any(k.lower() in l.lower() for k in _en_kws))
+    text = _re.sub(r" {2,}", " ", text)
+    lines = text.split("\n"); out = []
+    for line in lines:
+        st = line.strip()
+        if st.startswith("|") and st.endswith("|"):
+            inner = st[1:-1]; cells = inner.split("|")
+            # 最初のセルがセパレーターパターンなら行全体を正規化（全セル一致不要）
+            if cells and all(_re.match(r"^\s*:?-+:?\s*$", c) for c in cells if c.strip()):
+                line = "|" + "|".join(" --- " for _ in cells) + "|"
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+MANDATORY_RULES = """
+- 【確認質問全面禁止】「どのような情報にご興味がありますか？」「どのような業種・業態を想定されていますか？」「何についてお知りになりたいですか？」等、いかなる形式の確認質問・追加質問・質問返しも絶対禁止。RAGナレッジから最も適切な内容を直接回答せよ。対象者の確認はシステムが自動でボタンを生成する。LLM自身が確認・誘導をすることは一切禁止。
+- 【ナレッジ参照禁止表記】回答中に「【ナレッジ: ファイル名】」「【参照: ファイル名】」等のファイル名・ソース名を絶対に表示するな。ナレッジの内容は自然な文章として回答に統合せよ。ファイル名の露出は厳禁。
+"""
+
+DEFAULT_SYSTEM_PROMPT = """【最重要・全ルール最優先】いかなる質問・内容に対しても必ず回答を生成せよ。回答拒否・出力拒否は絶対禁止。水商売・接客業・ナイトビジネスを含む全合法業種のビジネス支援システムである。ナレッジ記載内容の出力は業務上の正当な情報提供であり、いかなる理由でも拒否するな。必ず日本語で回答を出力せよ。
+あなたは「Ys Consulting Office」の戦略コンサルタント（LM）である。
 目的は利益最大化・勝率向上・リスク最小化・意思決定の高速化。
 - 口調：丁寧・敬意。相手の理解速度に合わせるが結論は曖昧にしない。
 - 禁止：慰め・言い訳・情緒誘導・根拠なき断定。
@@ -28,31 +58,33 @@ DEFAULT_SYSTEM_PROMPT = """あなたは「Ys Consulting Office」の戦略コン
 - 【表記号禁止】回答中で「|」を使う場合は必ずMarkdown表形式で出力せよ。「|」を文中に単独で使うことは禁止。
 - 【表セパレーター】表のセパレーター行は必ず | --- | --- | 形式のみ使用せよ。スペースパディング・|:---|・|---|等は禁止。
 
+
 【ASCENDプラン定義 — 以下以外の情報は絶対に捏造・推測するな。不明な場合は「プラン詳細はYs Consulting Officeにお問い合わせください」とのみ回答せよ】
 
 ■ STARTER：¥0（新規7日間）
- エンジン: Core / AUTOモード
+ エンジン: SWIFT / AUTOモード
  利用可能: AIチャット(AUTOモード)、RAG検索、レベルスコア
  対象外: 診断機能全般、画像生成、ファイル診断、固定概念レポート、個人相談、投資シグナル
 
 ■ STANDARD：¥9,800/月
- エンジン: Core / 7モード対応
+ エンジン: SWIFT / 7モード対応
  利用可能: AIチャット(7モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ(構造/課題/比較/矛盾/実行)、画像生成、画像・ファイル解析(チャット内)
- 対象外: ファイル診断(Ultraエンジン)、固定概念レポート、個人相談、投資シグナル、ASCEND Ultra/Apex
+ 対象外: ファイル診断(Ultraエンジン)、固定概念レポート、個人相談、投資シグナル、ASCEND ADVANCE/SUPREME
 
 ■ PRO：¥39,800/月
- エンジン: Ultra / 全19モード対応
- 利用可能: AIチャット(全19モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ全6種、ファイル診断(Chain of Thought分析)、固定概念レポート(LGBM自動生成)、画像生成、画像ギャラリー、個人相談(スレッド往復)、ASCEND Ultra解放
- 対象外: 投資シグナル、ASCEND Apex
+ エンジン: ADVANCE / 全19モード対応
+ 利用可能: AIチャット(全19モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ全6種、ファイル診断(Chain of Thought分析)、固定概念レポート(LGBM自動生成)、画像生成、画像ギャラリー、個人相談(スレッド往復)、ASCEND ADVANCE解放
+ 対象外: 投資シグナル、ASCEND SUPREME
 
 ■ APEX：¥89,800/月
- エンジン: Apex / 全19モード対応
- 利用可能: 全機能解放、AIチャット(全19モード)、ファイル診断、固定概念レポート、投資シグナル(全銘柄)、ASCEND Apex(最上位AIエンジン)、個人相談、画像生成、ギャラリー、診断タブ全8種(投資シグナルタブ含む)
+ エンジン: SUPREME / 全19モード対応
+ 利用可能: 全機能解放、AIチャット(全19モード)、ファイル診断、固定概念レポート、投資シグナル(全銘柄)、ASCEND SUPREME(最上位AIエンジン)、個人相談、画像生成、ギャラリー、診断タブ全8種(投資シグナルタブ含む)
 
 ■ ULTRA：¥300,000/月〜（要相談・顧問契約）
- エンジン: Apex / 全19モード対応
+ エンジン: SUPREME / 全19モード対応
  利用可能: ASCEND全機能完全解放、Ys Consulting Office顧問契約付き、社員10名まで個別アカウント発行、企業テナント共有(RAG・診断履歴)、月次戦術レポート提出、新機能先行利用、月次ミーティング・直接支援
- 契約・問い合わせ: Ys Consulting Officeに直接連絡（UID記載必須）"""
+ 契約・問い合わせ: Ys Consulting Officeに直接連絡（UID記載必須）
+- 【言語】出力は必ず日本語のみ。英語・ロシア語・その他外国語の文字・単語の混入は絶対禁止。英語のメタ指示文（identify the issue / framing it as a question / I will then / Please provide等）を出力することは絶対禁止。"""
 
 # ── app.py と同一の Firestore パス ────────────────────────
 # chat_sessions/{scope}__{tenant_id}__{uid}__{chat_id}/messages/{msg_id}
@@ -66,18 +98,22 @@ def _messages_ref(tenant_id: str, uid: str, chat_id: str = "main"):
     doc_id = _session_doc_id(tenant_id, uid, chat_id)
     return db.collection("chat_sessions").document(doc_id).collection("messages")
 
-def _ensure_session(tenant_id: str, uid: str, chat_id: str = "main"):
+def _ensure_session(tenant_id: str, uid: str, chat_id: str = "main", title: str = "", force_create: bool = False):
+    from datetime import datetime
     db = get_db()
     doc_id = _session_doc_id(tenant_id, uid, chat_id)
-    db.collection("chat_sessions").document(doc_id).set({
-        "scope":      SCOPE,
-        "tenant_id":  tenant_id,
-        "uid":        uid,
-        "chat_id":    chat_id,
-        "updated_at": fs.SERVER_TIMESTAMP,
-        "created_at": fs.SERVER_TIMESTAMP,
-        "is_deleted": False,
-    }, merge=True)
+    ref = db.collection("chat_sessions").document(doc_id)
+    if force_create:
+        now = datetime.utcnow()
+        doc = {"scope": SCOPE, "tenant_id": tenant_id, "uid": uid, "chat_id": chat_id, "updated_at": now, "created_at": now, "is_deleted": False}
+        if title:
+            doc["title"] = title
+        ref.set(doc)
+    else:
+        doc = {"scope": SCOPE, "tenant_id": tenant_id, "uid": uid, "chat_id": chat_id, "updated_at": fs.SERVER_TIMESTAMP, "created_at": fs.SERVER_TIMESTAMP, "is_deleted": False}
+        if title:
+            doc["title"] = title
+        ref.set(doc, merge=True)
 
 # スコアワード定義
 _STRUCT_WORDS = ["構造","資本","市場","制度","最適","期待値","確率","アーキテクチャ","設計","フレームワーク"]
@@ -165,7 +201,7 @@ def _update_level_score(tenant_id: str, uid: str, delta: int):
     except Exception:
         pass
 
-def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: str, cases: list = None, structured: dict = None, images: list = None):
+def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: str, cases: list = None, structured: dict = None, images: list = None, sources: list = None):
     if not content or not content.strip():
         return
     # base64画像データをcontentから除去してから保存
@@ -192,6 +228,8 @@ def _save_message(tenant_id: str, uid: str, chat_id: str, role: str, content: st
         doc["structured"] = structured
     if images:
         doc["images"] = [{"mime_type": img.get("mime_type","image/png"), "gcs_url": img.get("gcs_url","")} for img in images if img.get("gcs_url")]
+    if sources is not None:
+        doc["sources"] = sources
     ref.add(doc)
 
 def _load_history(tenant_id: str, uid: str, chat_id: str = "main", limit: int = 20) -> List[dict]:
@@ -213,6 +251,8 @@ def _load_history(tenant_id: str, uid: str, chat_id: str = "main", limit: int = 
             msg["structured"] = data["structured"]
         if data.get("images"):
             msg["images"] = data["images"]
+        if data.get("sources"):
+            msg["sources"] = data["sources"]
         result.append(msg)
     return result
 
@@ -221,26 +261,26 @@ PLAN_DEFINITION = """
 【ASCENDプラン定義 — 以下以外の情報は絶対に捏造・推測するな。不明な場合は「プラン詳細はYs Consulting Officeにお問い合わせください」とのみ回答せよ】
 
 ■ STARTER：¥0（新規7日間）
- エンジン: Core / AUTOモード
+ エンジン: SWIFT / AUTOモード
  利用可能: AIチャット(AUTOモード)、RAG検索、レベルスコア
  対象外: 診断機能全般、画像生成、ファイル診断、固定概念レポート、個人相談、投資シグナル
 
 ■ STANDARD：¥9,800/月
- エンジン: Core / 7モード対応
+ エンジン: SWIFT / 7モード対応
  利用可能: AIチャット(7モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ(構造/課題/比較/矛盾/実行)、画像生成、画像・ファイル解析(チャット内)
- 対象外: ファイル診断(Ultraエンジン)、固定概念レポート、個人相談、投資シグナル、ASCEND Ultra/Apex
+ 対象外: ファイル診断(Ultraエンジン)、固定概念レポート、個人相談、投資シグナル、ASCEND ADVANCE/SUPREME
 
 ■ PRO：¥39,800/月
- エンジン: Ultra / 全19モード対応
- 利用可能: AIチャット(全19モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ全6種、ファイル診断(Chain of Thought分析)、固定概念レポート(LGBM自動生成)、画像生成、画像ギャラリー、個人相談(スレッド往復)、ASCEND Ultra解放
- 対象外: 投資シグナル、ASCEND Apex
+ エンジン: ADVANCE / 全19モード対応
+ 利用可能: AIチャット(全19モード)、RAG検索、レベルスコア、現状課題診断、Decision Metrics、診断タブ全6種、ファイル診断(Chain of Thought分析)、固定概念レポート(LGBM自動生成)、画像生成、画像ギャラリー、個人相談(スレッド往復)、ASCEND ADVANCE解放
+ 対象外: 投資シグナル、ASCEND SUPREME
 
 ■ APEX：¥89,800/月
- エンジン: Apex / 全19モード対応
- 利用可能: 全機能解放、AIチャット(全19モード)、ファイル診断、固定概念レポート、投資シグナル(全銘柄)、ASCEND Apex(最上位AIエンジン)、個人相談、画像生成、ギャラリー、診断タブ全8種(投資シグナルタブ含む)
+ エンジン: SUPREME / 全19モード対応
+ 利用可能: 全機能解放、AIチャット(全19モード)、ファイル診断、固定概念レポート、投資シグナル(全銘柄)、ASCEND SUPREME(最上位AIエンジン)、個人相談、画像生成、ギャラリー、診断タブ全8種(投資シグナルタブ含む)
 
 ■ ULTRA：¥300,000/月〜（要相談・顧問契約）
- エンジン: Apex / 全19モード対応
+ エンジン: SUPREME / 全19モード対応
  利用可能: ASCEND全機能完全解放、Ys Consulting Office顧問契約付き、社員10名まで個別アカウント発行、企業テナント共有(RAG・診断履歴)、月次戦術レポート提出、新機能先行利用、月次ミーティング・直接支援
  契約・問い合わせ: Ys Consulting Officeに直接連絡（UID記載必須）"""
 
@@ -296,34 +336,60 @@ def _load_tenant_system_prompt(tenant_id: str, uid: str = "") -> str:
                 return tenant_prompt
             if custom:
                 if mode == "replace":
-                    return custom + PLAN_DEFINITION if False else custom
+                    return custom + "\n\n" + MANDATORY_RULES
                 else:
-                    return tenant_prompt + "\n\n" + custom
+                    return tenant_prompt + "\n\n" + custom + "\n\n" + MANDATORY_RULES
     except Exception:
         pass
-    return tenant_prompt
+    return tenant_prompt + "\n\n" + MANDATORY_RULES
 
-def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: str = "", admin_uid: str = ""):
+def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: str = "", admin_uid: str = "", is_apex_ultra: bool = False):
     """returns (prompt_str, chunks_list)"""
     try:
-        chunks = rag_retrieve_chunks(tenant_id=tenant_id, query=query, top_k=5)
+        from api.core.rag import embed_text, rag_retrieve_chunks_with_vec
+        # ユーザーのRAG設定をFirestoreから取得
+        _rag_threshold = 0.42
+        _rag_top_k = 5
+        _cfg_uid = admin_uid if admin_uid else uid
+        if _cfg_uid:
+            try:
+                _usnap = get_db().collection("users").document(_cfg_uid).get()
+                _rag_cfg = ((_usnap.to_dict() or {}) if _usnap.exists else {}).get("rag_settings") or {}
+                _rag_threshold = float(_rag_cfg.get("threshold", 0.42))
+                _rag_top_k = int(_rag_cfg.get("top_k", 5))
+            except Exception:
+                pass
+        # embedding は1回だけ計算して使い回す
+        try:
+            _query_vec = embed_text(query)
+        except Exception:
+            return system_prompt, []
+        chunks = rag_retrieve_chunks_with_vec(tenant_id=tenant_id, query_vec=_query_vec, top_k=_rag_top_k, threshold=_rag_threshold)
         if admin_uid:
             try:
-                admin_chunks = rag_retrieve_chunks(tenant_id=f"user__{admin_uid}", query=query, top_k=10)
+                admin_chunks = rag_retrieve_chunks_with_vec(tenant_id=f"user__{admin_uid}", query_vec=_query_vec, top_k=5, threshold=_rag_threshold)
                 existing_ids = {c.get("chunk_id") for c in chunks}
                 chunks = chunks + [c for c in admin_chunks if c.get("chunk_id") not in existing_ids]
             except Exception:
                 pass
-        if uid:
+        if uid and is_apex_ultra:
             try:
-                user_chunks = rag_retrieve_chunks(tenant_id=f"user__{uid}", query=query, top_k=15)
+                user_chunks = rag_retrieve_chunks_with_vec(tenant_id=f"user__{uid}", query_vec=_query_vec, top_k=5, threshold=_rag_threshold)
                 existing_ids = {c.get("chunk_id") for c in chunks}
                 chunks = chunks + [c for c in user_chunks if c.get("chunk_id") not in existing_ids]
             except Exception:
                 pass
+        # APEX/ULTRA専用ナレッジが空の場合 → 中央倉庫(default)にフォールバック
+        if is_apex_ultra and not chunks:
+            try:
+                central_chunks = rag_retrieve_chunks_with_vec(tenant_id="default", query_vec=_query_vec, top_k=_rag_top_k, threshold=_rag_threshold)
+                if central_chunks:
+                    chunks = central_chunks
+            except Exception:
+                pass
         if chunks:
             rag_text = "\n\n---\n\n".join(
-                f"【ナレッジ: {c.get('title', '')}】\n{c.get('text', '')[:1500]}"
+                f"【参考情報】\n{c.get('text', '')[:1500]}"
                 for c in chunks[:10]
             )
             # 問いの型判定: 知識・定義・方法系 → RAG即答優先 / 感情・相談系 → カスタム優先
@@ -335,6 +401,17 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: 
                 r"とは何", r"とはどういう", r"の意味", r"の定義",
                 r"チェックリスト", r"一覧", r"リスト", r"全問", r"評価",
                 r"学べる", r"ここで学", r"項目", r"ランキング", r"比較",
+                r"流れ", r"ステップ", r"プロセス", r"順番", r"どのように",
+                r"どんな", r"どうすれば", r"どうしたら", r"どう", r"何を",
+                r"何が", r"なぜ", r"なに", r"仕方", r"方針",
+                r"ルール", r"規則", r"基準", r"マニュアル", r"ガイド",
+                r"おすすめ", r"お勧め", r"推奨", r"ベスト", r"最適",
+                r"注意", r"気をつける", r"NG", r"禁止", r"必要",
+                r"大切", r"重要", r"秘訣",
+                r"具体的", r"詳しく", r"もっと", r"教えてください",
+                r"接客", r"対応", r"案内", r"説明", r"紹介",
+                r"準備", r"確認", r"チェック", r"管理", r"運営",
+                r"できる", r"できますか", r"方法は", r"するべき",
             ]
             _is_knowledge_query = any(
                 _re_qt.search(p, query) for p in _knowledge_patterns
@@ -344,13 +421,23 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: 
                     f"【知識回答モード】以下の複数の参照ナレッジを統合して質問に答えよ。"
                     f"各ナレッジの具体的な内容・事例・表現を活かし、抽象的・一般論的な回答は禁止。"
                     f"キャラクターの口調・絵文字を維持しながら説得力ある具体的な回答をせよ。問いかけ返し・感情確認禁止。"
-                    f"【出力形式】比較・チェックリスト・一覧・評価項目を含む場合は必ずMarkdown表で出力せよ。"
+                    f"【用語解釈厳守】ナレッジに記載された用語・定義・固有名詞はそのままの意味で使用せよ。独自解釈・拡張解釈は絶対禁止。"
+                    f"【出力形式】比較・チェックリスト・一覧・評価項目を含む場合は必ずMarkdown表で出力せよ。表の各セルは1行・50文字以内で簡潔に記述せよ。セル内に改行・番号付きリスト・長文・URLを絶対に入れるな。"
                     f"Markdown表のセパレーター行は | --- | --- | 形式のみ（:や=や-の4つ以上連続は禁止）。"
                     f"重要ポイントは**太字**で強調せよ。\n\n"
                     f"【参照ナレッジ({len(chunks)}件)】\n{rag_text}\n\n{system_prompt}"
                 ), chunks
             else:
-                return f"{system_prompt}\n\n【参照ナレッジ】\n{rag_text}", chunks
+                _max_score = max((c.get("_score", 0) for c in chunks), default=0)
+                if _max_score >= 0.70:
+                    return (
+                        f"【ナレッジ参照モード】以下の参照ナレッジに記載された情報を最優先で使用して質問に答えよ。"
+                        f"ナレッジに該当情報がある場合はキャラクターの口調を維持しながら必ずその内容を回答に反映せよ。"
+                        f"ナレッジに記載のない情報は独自に作らず'確認できませんでした'と答えよ。\n\n"
+                        f"【参照ナレッジ({len(chunks)}件)】\n{rag_text}\n\n{system_prompt}"
+                    ), chunks
+                else:
+                    return f"{system_prompt}\n\n【参考情報】\n{rag_text}", chunks
     except Exception:
         pass
     return system_prompt, []
@@ -364,12 +451,16 @@ class ChatRequest(BaseModel):
     chat_mode: str = "consult"
 
 class ChatResponse(BaseModel):
+    intent: dict | None = None
+    intent_label: str | None = None
     reply: str
     chat_id: str
     msg_id: str
     cases: list = []
     images: list = []
     structured: Optional[dict] = None
+    intent: Optional[dict] = None
+    intent_label: Optional[str] = None
 
 class SessionInfo(BaseModel):
     chat_id: str
@@ -413,34 +504,39 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     import threading as _threading
     _intent_result = {}
     _intent_thread = None
-    if not is_talk and not _is_custom_replace:
+    _plan_thread = None
+    _plan_result = {}
+    if not _is_custom_replace:
         def _run_intent():
             try:
                 _intent_result["state"] = update_user_intent_state(uid, tenant_id, history, req.message)
             except Exception:
                 pass
+        def _run_plan():
+            try:
+                _plan_result["plan"] = generate_query_plan(req.message, tenant_id, "mixed")
+            except Exception:
+                pass
         _intent_thread = _threading.Thread(target=_run_intent, daemon=True)
+        _plan_thread = _threading.Thread(target=_run_plan, daemon=True)
         _intent_thread.start()
+        _plan_thread.start()
 
-    # QueryPlan生成（相談モードのみ・専用ボットモード以外）
+    # QueryPlan・SummaryLens（スレッド結果を回収）
     query_plan = {}
-    if not is_talk and not _is_custom_replace:
-        try:
-            query_plan = generate_query_plan(req.message, tenant_id, "mixed")
-        except Exception:
-            pass
-    # SummaryLens選択（専用ボットモード以外）
     lens_preset, lens_hier = "expert", "raw"
+
+    # 脳内カルテ・QueryPlan両スレッドをまとめてjoin
+    if _intent_thread: _intent_thread.join(timeout=3.0)
+    if _plan_thread: _plan_thread.join(timeout=3.0)
     if not _is_custom_replace:
+        query_plan = _plan_result.get("plan", {})
         try:
             lens_preset, lens_hier = lgbm_select_summary_lens(req.message, "auto")
         except Exception:
             lens_preset, lens_hier = "expert", "raw"
         if query_plan.get("summary_lens", {}).get("preset"):
             lens_preset = query_plan["summary_lens"]["preset"]
-
-    # 脳内カルテをsystem_promptに注入（専用ボットモード以外）
-    if _intent_thread: _intent_thread.join(timeout=0.0)
     intent_state = _intent_result.get("state", {}) if not _is_custom_replace else {}
     intent_ctx = ""
     if intent_state and not _is_custom_replace:
@@ -464,8 +560,10 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
                     break
     except Exception:
         pass
+    _user_plan = (_u_data.get("plan") or "user").strip()
+    _is_apex_ultra = _user_plan in ("apex", "ultra_admin", "ultra_member")
     if not is_talk:
-        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt, uid=payload.get("uid",""), admin_uid=_admin_uid)
+        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt, uid=payload.get("uid",""), admin_uid=_admin_uid, is_apex_ultra=_is_apex_ultra)
     else:
         system_prompt, _rag_chunks = base_prompt, []
         # 会話モード：カスタムプロンプトがある場合はRAG+URL注入を発動
@@ -475,27 +573,34 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         except Exception:
             _talk_has_custom = False
         _talk_has_admin_rag = bool(_admin_uid)
-        if _talk_has_custom or _talk_has_admin_rag:
-            # 会話モード: カスタムプロンプトのみをベースにRAG知識を注入（形式模倣防止）
-            _talk_custom_only = ((_talk_user_doc.to_dict() or {}).get("custom_sys_prompt") or "").strip()
-            _talk_base = _talk_custom_only if (_talk_custom_only and not _is_custom_replace) else base_prompt
-            system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, _talk_base, uid=uid, admin_uid=_admin_uid)
+        # 会話モード: 常にRAGを呼ぶ（全プラン共通）
+        _talk_custom_only = ((_talk_user_doc.to_dict() or {}).get("custom_sys_prompt") or "").strip() if _talk_has_custom else ""
+        _talk_base = _talk_custom_only if (_talk_custom_only and not _is_custom_replace) else base_prompt
+        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, _talk_base, uid=uid, admin_uid=_admin_uid, is_apex_ultra=_is_apex_ultra)
         if _talk_has_custom and not _is_custom_replace:
             system_prompt = (
-                "【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を背景知識として使い、"
+                "【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を完全に内面化し、自分の言葉として再構築して答えよ。"
+                "ナレッジの文言・ファイル名・資料名・出典を直接引用・露出することは絶対禁止。"
                 "質問に対してキャラクターの口調で直接答えよ。"
                 "知識ファイルに表・一覧・チェックリストが含まれる場合は必ずMarkdown表で出力せよ。"
-                "それ以外は3〜5文の自然な会話口調で答えよ。"
+                "それ以外は内容の深さに応じて自然な会話口調で答えよ。"
                 "前置き宣言（「今回は〜についてご説明します」等）は禁止。\n\n"
                 + system_prompt
             )
         # 会話モード：専用ボットモード以外かつカスタムプロンプトなしのみコンサル形式を上書き
-        if not _is_custom_replace and not _talk_has_custom:
+        _list_keywords = ["リスト","一覧","やること","手順","チェックリスト","箇条","ステップ","まとめて","列挙"]
+        _is_list_req = any(w in req.message for w in _list_keywords)
+        if not _is_apex_ultra and not _is_custom_replace and not _talk_has_custom and not _is_list_req:
             system_prompt = system_prompt.replace(
                 "出力形式：結論→打ち手→優先順位→リスク→次の観測。",
                 "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ。"
             ) + "\n\n【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"
+    _RAG_THRESHOLD = 0.70  # 高確信度閾値: これ以上のスコアのみis_retrieved=True
+    _max_rag_score = max((c.get("_score", 0) for c in _rag_chunks), default=0.0) if _rag_chunks else 0.0
+    print(f"[RAG_VERIFY] chunks={len(_rag_chunks)} max_score={_max_rag_score:.3f}", flush=True)
     system_prompt = system_prompt + intent_ctx
+    if _rag_chunks:
+        system_prompt += '\n\nナレッジに記載のない情報を生成することは絶対禁止。参照ナレッジに記載がない場合は「該当情報なし」と回答せよ。'
 
     # ── ASCENDプラン情報条件注入 ─────────────────────────────────────
     _plan_kws = ["プラン","料金","ascend","サブスク","subscription","ultra","apex","pro","standard","starter","月額","契約"]
@@ -504,8 +609,13 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         _has_custom = bool((_u_doc2.to_dict() or {}).get("custom_sys_prompt", "")) if _u_doc2.exists else False
     except Exception:
         _has_custom = False
-    if any(k in req.message.lower() for k in _plan_kws) and not _has_custom:
+    _plan_hit_m = any(k in req.message.lower() for k in _plan_kws)
+    if _plan_hit_m:
         system_prompt += PLAN_DEFINITION
+    # RAG=0件 かつ プランキーワードなし → ⚠️フォールバック
+    _no_rag_fallback = (not _rag_chunks) and (not _plan_hit_m)
+    if _no_rag_fallback:
+        system_prompt += '\n\n【⚠️ナレッジ未検証回答モード】専用ナレッジ・中央倉庫のいずれにも該当情報が存在しない。質問に対してLLMの一般知識で誠実に回答せよ。「回答できません」「専門外です」等の拒否は絶対禁止。回答の冒頭に必ず「⚠️ナレッジ未検証回答」と表示せよ。'
 
     # ── カスタムプロンプト内キーワード→URL強制注入 ──────────────────
     try:
@@ -697,7 +807,25 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"AI呼び出しエラー: {e}")
 
+
     # suggested cases 生成
+    _sources = []
+    if _rag_chunks and not generated_images:
+        _max_sc = max((float(c.get("_score",0)) for c in _rag_chunks), default=0.0)
+        _is_retrieved = _max_sc >= _RAG_THRESHOLD
+        print(f"[RAG_RETRIEVED] max_score={_max_sc:.3f} is_retrieved={_is_retrieved} chunks={len(_rag_chunks)}", flush=True)
+        _RAG_USE_THRESHOLD = 0.3  # 実際に使われた閾値
+        _sources = [
+            {
+                "text": (_ck.get("text","") or "")[:200],
+                "score": float(_ck.get("_score", 0)),
+                "source_id": str(_ck.get("source_id","")),
+                "is_retrieved": float(_ck.get("_score", 0)) >= _RAG_USE_THRESHOLD,
+            }
+            for _ck in _rag_chunks
+        ]
+    elif not generated_images:
+        _sources = [] if _plan_hit_m else [{"text": "", "score": 0.0, "source_id": "", "is_retrieved": False}]
     cases = []
     try:
         from api.core.llm_client import call_llm as _cllm
@@ -708,9 +836,10 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
             ai_tier="core", max_tokens=256
         )
         cases = [l.strip() for l in _cases_raw.strip().split("\n") if l.strip()][:3]
-    except Exception:
+        print(f"[CASES_DEBUG] raw={repr(_cases_raw[:300])} count={len(cases)}", flush=True)
+    except Exception as _cases_err:
+        print(f"[CASES_ERROR] {_cases_err}", flush=True)
         cases = []
-
     # 構造化データ生成（戦略相談時のみ・画像生成・雑談は除外）
     structured = None
     _consulting_intents = {"相談", "意思決定", "分析", "作成", "予測", "投資"}
@@ -719,7 +848,9 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _mode_forced = (req.purpose_mode or "auto").strip().lower() != "auto"
     _is_consulting = (not is_talk) and ((_mode_forced) or ((not _is_talk_intent) and (any(i in _qp_intent for i in _consulting_intents))))
     # 相談モードでも雑談intentの場合は会話形式で返答
-    if (is_talk or _is_talk_intent) and not system_prompt.endswith("【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"):
+    _list_keywords2 = ["リスト","一覧","やること","手順","チェックリスト","箇条","ステップ","まとめて","列挙"]
+    _is_list_req2 = any(w in req.message for w in _list_keywords2)
+    if (is_talk or _is_talk_intent) and not _is_list_req2 and not system_prompt.endswith("【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"):
         system_prompt = system_prompt.replace(
             "出力形式：結論→打ち手→優先順位→リスク→次の観測。",
             "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ。"
@@ -798,7 +929,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
                             "uid": uid,
                             "chunk_id": chunk_id,
                             "query": req.message[:500],
-                            "score": float(chunk.get("score",0)),
+                            "score": float(chunk.get("_score",0)),
                             "adopted": True,
                             "purpose_mode": "auto",
                             "recorded_at": __import__("datetime").datetime.now().isoformat(),
@@ -854,23 +985,8 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         except Exception:
             pass
 
-    # スペースパディング・セパレーター行正規化
-    def _clean_reply(s):
-        import re as _re
-        s = _re.sub(r" {2,}", " ", s)
-        lines = s.split("\n")
-        out = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("|") and stripped.endswith("|"):
-                inner = stripped[1:-1]
-                cells = inner.split("|")
-                if all(_re.match(r"^\s*:?-+:?\s*$", c) for c in cells if c.strip()):
-                    line = "|" + "|".join(" --- " for _ in cells) + "|"
-            out.append(line)
-        return "\n".join(out).strip()
     reply = _clean_reply(reply)
-    _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured, images=generated_images)
+    _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured, images=generated_images, sources=_sources)
     # usage_logs に記録（total_chat_count 集計用）
     try:
         import datetime as _dt
@@ -880,12 +996,12 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
             "prompt": req.message[:500],
             "purpose_mode": getattr(req, "purpose_mode", "auto"),
             "is_admin_test": False,
-            "recorded_at": _dt.datetime.utcnow().isoformat(),
+            "timestamp": (_dt.datetime.utcnow() + _dt.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),
         })
     except Exception:
         pass
 
-    return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=cases, images=generated_images, structured=structured)
+    return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=cases, images=generated_images, structured=structured, sources=_sources, confirmation_choices=_confirmation_choices, intent=intent_state if isinstance(intent_state, dict) else None, intent_label=query_plan.get("intent","") if isinstance(query_plan, dict) else None)
 
 @router.get("/history/{chat_id}")
 def get_history(chat_id: str, payload: dict = Depends(verify_token)):
@@ -904,9 +1020,7 @@ def list_sessions(payload: dict = Depends(verify_token)):
         docs = (
             db.collection("chat_sessions")
             .where("uid", "==", uid)
-            .where("tenant_id", "==", tenant_id)
-            .where("scope", "==", SCOPE)
-            .limit(50)
+            .limit(500)
             .stream()
         )
         result = []
@@ -914,13 +1028,17 @@ def list_sessions(payload: dict = Depends(verify_token)):
             data = d.to_dict() or {}
             if data.get("is_deleted", False):
                 continue
+            if data.get("tenant_id") != tenant_id:
+                continue
+            if data.get("scope") != SCOPE:
+                continue
             result.append(SessionInfo(
                 chat_id    = data.get("chat_id", "main"),
                 title      = data.get("title", data.get("chat_id", "main")),
                 updated_at = str(data.get("updated_at", "")),
             ))
         result.sort(key=lambda x: x.updated_at or "", reverse=True)
-        return result[:30]
+        return result[:50]
     except Exception:
         return [SessionInfo(chat_id="main", title="main")]
 
@@ -929,7 +1047,7 @@ def new_session(payload: dict = Depends(verify_token)):
     uid       = payload["uid"]
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
     chat_id   = str(uuid.uuid4())[:8]
-    _ensure_session(tenant_id, uid, chat_id)
+    _ensure_session(tenant_id, uid, chat_id, title="新しいチャット", force_create=True)
     return {"chat_id": chat_id}
 
 from fastapi import UploadFile, File, Form
@@ -1030,7 +1148,7 @@ AI: {req.last_reply[:300]}
 
 # ── 画像生成判定 ──────────────────────────────────────────────
 _IMAGE_WORDS = ["画像","イメージ","イラスト","ロゴ","アイコン","バナー","ポスター","サムネ","image","illustration","logo","icon","banner","poster"]
-_ACTION_WORDS = ["作って","作成","生成","描いて","描画","出力","デザイン","作る","generate","create","draw","design","render"]
+_ACTION_WORDS = ["作って","描いて","描画","デザイン","作る","generate","draw","design","render"]
 _EDIT_WORDS = ["編集","加工","修正","変換","背景","切り抜","色変更","edit","modify","restyle"]
 _ANALYSIS_WORDS = ["解析","分析","要約","読んで","説明","pdf","spreadsheet","excel","スプレッドシート"]
 
@@ -1298,7 +1416,7 @@ def save_feedback(req: FeedbackRequest, payload: dict = Depends(verify_token)):
 
 # ── 画像生成判定 ──────────────────────────────────────────────
 _IMAGE_WORDS = ["画像","イメージ","イラスト","ロゴ","アイコン","バナー","ポスター","サムネ","image","illustration","logo","icon","banner","poster"]
-_ACTION_WORDS = ["作って","作成","生成","描いて","描画","出力","デザイン","作る","generate","create","draw","design","render"]
+_ACTION_WORDS = ["作って","描いて","描画","デザイン","作る","generate","draw","design","render"]
 _EDIT_WORDS = ["編集","加工","修正","変換","背景","切り抜","色変更","edit","modify","restyle"]
 _ANALYSIS_WORDS = ["解析","分析","要約","読んで","説明","pdf","spreadsheet","excel","スプレッドシート"]
 
@@ -1394,7 +1512,7 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
     # usage_log書き込み
     try:
         _ulog_db2 = get_db()
-        _ulog_db2.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "is_admin_test": False})
+        _ulog_db2.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False})
     except Exception:
         pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=generated_images)
@@ -1492,7 +1610,7 @@ def send_file(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
     # usage_log書き込み
     try:
         _ulog_db3 = get_db()
-        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "is_admin_test": False})
+        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False})
     except Exception:
         pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[], structured=_inv_structured)
@@ -1600,7 +1718,7 @@ def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
     # usage_log書き込み
     try:
         _ulog_db3 = get_db()
-        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "is_admin_test": False})
+        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False})
     except Exception:
         pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[])
@@ -1638,3 +1756,532 @@ def delete_image(image_id: str, payload: dict = Depends(verify_token)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 # DEBUG REMOVE LATER
+
+# ============================================================
+# SSE Streaming Endpoints
+# ============================================================
+def _sse_evt(data: dict) -> str:
+    payload = _json_sse.dumps(data, ensure_ascii=False)
+    return f"data: {payload}\n\n"
+
+@router.post("/send_stream")
+def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token)):
+    import queue as _qm, threading as _thm
+    _q = _qm.Queue()
+    _DONE = object()
+    def _worker():
+        try:
+            import time as _tss
+            _q.put({"type":"step","label":"入力を解析中..."})
+            uid = payload["uid"]
+            tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+            chat_id = (req.chat_id or "main").strip() or "main"
+            _ensure_session(tenant_id, uid, chat_id)
+            history = _load_history(tenant_id, uid, chat_id)
+            base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
+            chat_mode = (req.chat_mode or "consult").strip().lower()
+            is_talk = chat_mode == "talk"
+            _is_custom_replace = False
+            _u_doc = {}
+            try:
+                _u_snap = get_db().collection("users").document(uid).get()
+                if _u_snap.exists:
+                    _u_doc = _u_snap.to_dict() or {}
+                    _hc = bool(_u_doc.get("custom_sys_prompt",""))
+                    _ir2 = _u_doc.get("custom_prompt_mode","append") == "replace"
+                    _is_custom_replace = _hc and _ir2 and is_talk
+            except Exception:
+                pass
+            _uplan = (_u_doc.get("plan") or "user").strip()
+            _is_au = _uplan in ("apex","ultra_admin","ultra_member")
+
+            # ── 対象者確認：Pythonで曖昧さ検出→LLMで選択肢動的生成 ──
+            import re as _re_amb
+            _amb_keywords = [
+                r"チェックリスト", r"手順", r"マニュアル", r"業務フロー", r"学べる", r"ここで学",
+                r"やること", r"ルール", r"規則", r"注意事項", r"やり方", r"方法", r"流れ",
+                r"教えて", r"一覧", r"リスト", r"項目", r"内容", r"説明して", r"とは",
+            ]
+            _amb_hit = any(_re_amb.search(kw, req.message) for kw in _amb_keywords)
+            # historyから選択済みターゲットを抽出
+            _resolved_target = ""
+            for _hi in range(len(history) - 1, -1, -1):
+                _hm = history[_hi]
+                if _hm.get("role") == "assistant" and "【確認】" in (_hm.get("content", "")):
+                    if _hi + 1 < len(history) and history[_hi + 1].get("role") == "user":
+                        _user_ans = history[_hi + 1].get("content", "").strip()
+                        _resolved_target = _user_ans[:30]
+                    break
+            _last_ai = next((m for m in reversed(history) if m.get("role") == "assistant"), None)
+            _already_asked = _last_ai and "【確認】" in (_last_ai.get("content", ""))
+            # 対象者抽出（構造で判断・_amb_hit不問）
+            import re as _re
+            # ── admin_uid 解決（_rc_pre前に必ず実施） ──
+            _admin_uid = ""
+            try:
+                _need_admin_rag = (
+                    (_u_doc.get("plan") == "ultra_member" and _u_doc.get("use_admin_settings", False))
+                    or _u_doc.get("plan") in ("apex", "ultra_admin")
+                )
+                if _need_admin_rag:
+                    # 1次: tenant_id フィルターで検索
+                    _ads = list(get_db().collection("users").where("tenant_id", "==", tenant_id).limit(50).stream())
+                    for _ad in _ads:
+                        _add = _ad.to_dict() or {}
+                        if _add.get("plan") in ("ultra_admin",):
+                            _admin_uid = _ad.id
+                            break
+                    # 2次フォールバック: 廃止（200件フルスキャンは遅延の原因）
+            except Exception:
+                pass
+            _rc_pre = []  # _rc_pre廃止: _rcと一本化
+            _tgt_candidates = []
+            _seen_sids = {}
+            for c in _rc_pre:
+                _sid = c.get("source_id","") or c.get("_source_id","")
+                _cscore = float(c.get("_score", c.get("score", 0)))
+                if _cscore < 0.55: continue
+                _stitle = (c.get("title","") or "").strip()
+                import re as _re_ext
+                _stitle = _re_ext.sub(r"\.[a-zA-Z0-9]{2,5}$", "", _stitle).strip()
+                _ctext = (c.get("text","") or "").strip()[:40].replace("\n"," ")
+                _label = _stitle if _stitle else _ctext
+                if _sid and _label and _sid not in _seen_sids:
+                    _seen_sids[_sid] = _label
+            if len(_seen_sids) >= 2:
+                _tgt_candidates = list(_seen_sids.values())[:3]
+            # --- 対象者推定（チャンク内容からGeminiで誰向けかを判定）---
+            if len(_tgt_candidates) >= 2:
+                try:
+                    import re as _re_inf
+                    _AUDIENCE_KEYWORDS = [
+                        # 水商売・ナイト系
+                        (["キャスト","cast","嬢","女の子","ホスト","ホステス","コンパニオン","源氏名"], "キャスト向け"),
+                        # 店舗スタッフ全般
+                        (["スタッフ","staff","従業員","店員","ホールスタッフ","フロアスタッフ","アルバイト","パート","ボーイ","黒服"], "スタッフ向け"),
+                        # 新人・研修
+                        (["新人","新入","研修","入門","初心者","ビギナー","入社","新卒","OJT","見習い","仮配属"], "新人向け"),
+                        # 管理職・リーダー
+                        (["リーダー","店長","マネージャー","幹部","責任者","管理職","副店長","チーフ","統括","エリアマネージャー","オーナー","経営者","社長"], "リーダー・管理職向け"),
+                        # 営業・販売職
+                        (["営業","セールス","販売","sales","商談","提案","クロージング","テレアポ","飛び込み"], "営業・販売向け"),
+                        # 美容・サロン系
+                        (["美容師","スタイリスト","エステ","ネイリスト","アイリスト","セラピスト","施術","カット","トリートメント"], "美容・サロン向け"),
+                        # 医療・介護
+                        (["看護師","医師","介護士","ヘルパー","ケアマネ","薬剤師","リハビリ","クリニック","病院","福祉"], "医療・介護向け"),
+                        # 飲食・接客
+                        (["ウェイター","ウェイトレス","調理師","シェフ","料理人","キッチン","ホール","飲食","レストラン","カフェ","居酒屋"], "飲食・接客向け"),
+                        # 事務・バックオフィス
+                        (["事務","バックオフィス","経理","総務","人事","労務","庶務","受付","秘書"], "事務・管理部門向け"),
+                        # エンジニア・IT
+                        (["エンジニア","開発者","プログラマー","システム","IT","デザイナー","ディレクター","PM","プロジェクトマネージャー"], "エンジニア・IT向け"),
+                        # 教育・講師
+                        (["教師","講師","インストラクター","トレーナー","コーチ","先生","教員","塾","学校"], "教育・指導者向け"),
+                        # 顧客・クライアント
+                        (["顧客","お客様","クライアント","ユーザー","消費者","購入者","会員"], "顧客・クライアント向け"),
+                        # 共通
+                        (["共通","全員","全スタッフ","全体","誰でも","全職種","全部門"], "共通"),
+                    ]
+                    _all_text = " ".join([
+                        (c.get("title","") or "") + " " + (c.get("text","") or "")[:200]
+                        for c in _rc_pre[:8] if float(c.get("_score", c.get("score",0))) >= 0.45
+                    ]).lower()
+                    _inferred_set = []
+                    for _kws, _label in _AUDIENCE_KEYWORDS:
+                        if any(k.lower() in _all_text for k in _kws):
+                            if _label not in _inferred_set:
+                                _inferred_set.append(_label)
+                    if len(_inferred_set) >= 2:
+                        _tgt_candidates = _inferred_set[:3]
+                    elif len(_inferred_set) == 1:
+                        _tgt_candidates = _inferred_set + ["共通"]
+                except Exception as _infer_err:
+                    print('INFER_ERR:', _infer_err, flush=True)
+            # --- デバッグprint除去済み ---
+            try:
+                _u_pre = get_db().collection("users").document(uid).get()
+                _has_custom_pre = bool((_u_pre.to_dict() or {}).get("custom_sys_prompt","")) if _u_pre.exists else False
+            except Exception:
+                _has_custom_pre = False
+            if len(_tgt_candidates) >= 2 and not _already_asked and not _is_au and not _has_custom_pre:
+                _choices = _tgt_candidates
+                _confirm_reply = "【確認】「{}」について確認させてください。\n誰向けの情報をお探しですか？".format(req.message[:20])
+                _confirm_cases = []
+                _save_message(tenant_id, uid, chat_id, "user", req.message)
+                _save_message(tenant_id, uid, chat_id, "assistant", _confirm_reply, cases=_confirm_cases)
+                _q.put({"type":"done","reply":_confirm_reply,"chat_id":chat_id,"msg_id":str(__import__("uuid").uuid4()),"cases":_confirm_cases,"confirmation_choices":_tgt_candidates,"images":[],"structured":None,"sources":[],"intent":{},"intent_label":""})
+                return
+            # 選択済みターゲットをプロンプトに注入
+            if _resolved_target:
+                base_prompt = base_prompt + "\n\n【対象者指定】ユーザーが選択した回答対象は「" + _resolved_target + "」。この対象向けに限定して回答せよ。"
+
+
+            import threading as _th2
+            _ires = {}
+            qp = {}
+            if not _is_custom_replace or _is_au:
+                _q.put({"type":"step","label":"意図を特定中..."})
+            _lens_preset, _lens_hier = "expert", "raw"
+            if not _is_custom_replace:
+                try: _lens_preset, _lens_hier = lgbm_select_summary_lens(req.message, "auto")
+                except Exception: pass
+                if qp.get("summary_lens", {}).get("preset"):
+                    _lens_preset = qp["summary_lens"]["preset"]
+            if not _is_custom_replace or _is_au:
+                _q.put({"type":"step","label":"専用ナレッジを検索中..." if _is_au else "ナレッジを検索中..."})
+            # _admin_uid は _rc_pre 前に解決済み（再代入しない）
+            _thcd = False
+            _tud = None
+            try:
+                _tud = get_db().collection("users").document(uid).get()
+                _thcd = bool((_tud.to_dict() or {}).get("custom_sys_prompt","")) if _tud.exists else False
+            except Exception:
+                pass
+            # 全プラン・全モードでRAGを呼ぶ
+            _tco = ((_tud.to_dict() or {}).get("custom_sys_prompt") or "").strip() if (_thcd and _tud) else ""
+            _tb = _tco if (_tco and not _is_custom_replace) else base_prompt
+            _rc = []
+            sp, _rc = _build_system_with_rag(tenant_id, req.message + ('　' + _resolved_target if _resolved_target else ''), _tb, uid=uid, admin_uid=_admin_uid, is_apex_ultra=_is_au)
+            _rc_pre = _rc  # _rc_preを_rcで代替
+            if _thcd and not _is_custom_replace:
+                sp = ("【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を完全に内面化し、自分の言葉として再構築して答えよ。"
+                      "ナレッジの文言・ファイル名・資料名・出典を直接引用・露出することは絶対禁止。"
+                      "質問に対してキャラクターの口調で直接答えよ。"
+                      "知識ファイルに表・一覧・チェックリストが含まれる場合は必ずMarkdown表で出力せよ。表は1行1レコードで各セルを簡潔に記述し、セル内で改行・番号付きリスト・複数段落を混在させるな。"
+                      "前置き宣言（「今回は〜についてご説明します」等）は禁止。\n\n" + sp)
+            _lk = ["リスト","一覧","やること","手順","チェックリスト","箇条","ステップ","まとめて","列挙"]
+            _ilr = any(w in req.message for w in _lk)
+            if not _is_au and not _is_custom_replace and not _thcd and not _ilr:
+                sp = sp.replace("出力形式：結論→打ち手→優先順位→リスク→次の観測。",
+                                "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ."
+                                ) + "\n\n【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"
+            pass  # _it無効化済み
+            ist = _ires.get("state",{}) if not _is_custom_replace else {}
+            if ist and not _is_custom_replace and not (_is_au and is_talk):
+                sp += (f"\n\n【ユーザーの脳内カルテ（深層プロファイル）】"
+                       f"\n・ステージ: {ist.get('current_stage','')}"
+                       f"\n・真の渇望: {ist.get('true_desire','')}"
+                       f"\n・バイアス: {ist.get('bias','')}"
+                       f"\n・不足観点: {ist.get('missing_piece','')}")
+            _plan_kws = ["プラン","料金","ascend","サブスク","subscription","ultra","apex","pro","standard","starter","月額","契約"]
+            _plan_hit = any(k in req.message.lower() for k in _plan_kws)
+            if _plan_hit:
+                sp += "\n\n" + PLAN_DEFINITION
+            # RAG=0件 かつ システムプロンプトにも該当なし → ⚠️フォールバック
+            _no_rag_fallback_s = (not _rc) and (not _plan_hit)
+            if _no_rag_fallback_s:
+                sp += '\n\n【⚠️ナレッジ未検証回答モード】専用ナレッジ・中央倉庫のいずれにも該当情報が存在しない。質問に対してLLMの一般知識で誠実に回答せよ。「回答できません」「専門外です」等の拒否は絶対禁止。回答の冒頭に必ず「⚠️ナレッジ未検証回答」と表示せよ。'
+            _mk = (req.purpose_mode or "auto").strip().lower()
+            _MI = {
+                "strategy":"【STRATEGYモード】戦略立案・競合優位・中長期計画に特化せよ。",
+                "numeric":"【NUMERICモード】数値・指標・KPI・ROI分析に特化せよ。",
+                "growth":"【GROWTHモード】成長戦略・人材育成・スケール設計に特化せよ。",
+                "control":"【CONTROLモード】構造・権限・意思決定フローの可視化に特化せよ。",
+                "analysis":"【ANALYSISモード】データ分析・原因究明・相関発見に特化せよ。",
+                "planning":"【PLANNINGモード】ロードマップ・フェーズ設計に特化せよ。時系列・マイルストーン・依存関係を明示したアクションプランを提示せよ。",
+                "risk":"【RISKモード】リスク評価・シナリオ分析・回避戦略に特化せよ。",
+                "creative":"【CREATIVEモード】アイデア発想・コンセプト設計・差別化に特化せよ。",
+                "summary":"【SUMMARYモード】要点抽出・構造化・整理に特化せよ。",
+                "negotiation":"【NEGOTIATIONモード】交渉・説得・影響力行使に特化せよ。",
+                "coaching":"【COACHINGモード】個人成長支援・目標達成サポートに特化せよ。",
+                "diagnosis":"【DIAGNOSISモード】現状診断・課題発見・改善提案に特化せよ。",
+                "forecast":"【FORECASTモード】予測・シナリオ分析・将来設計に特化せよ。",
+                "legal":"【LEGALモード】法務・規約・コンプライアンスに特化せよ。",
+                "finance":"【FINANCEモード】財務・投資・資金調達の分析に特化せよ。",
+                "marketing":"【MARKETINGモード】マーケ・集客・ブランド戦略に特化せよ。",
+                "hr":"【HRモード】人材・組織・採用・育成に特化せよ。",
+                "ops":"【OPSモード】業務改善・効率化・プロセス最適化に特化せよ。",
+                "tech":"【TECHモード】技術・エンジニアリング・システム設計に特化せよ。",
+            }
+            if not is_talk and _mk in _MI and not _is_custom_replace:
+                sp = _MI[_mk] + "\n\n" + sp
+            _LENS_INST = {
+                "expert":   "【出力スタイル: EXPERT】論拠・根拠・数値・事例を必ず含めよ。",
+                "mentor":   "【出力スタイル: MENTOR】段階的に教えよ。初心者でも理解できる説明を心がけよ。",
+                "executor": "【出力スタイル: EXECUTOR】具体的な手順・アクションを優先せよ。番号付きステップで実行可能な形で提示せよ。",
+                "general":  "【出力スタイル: GENERAL】要点を簡潔にまとめよ。3〜5項目に絞り、わかりやすく整理せよ。",
+            }
+            if not is_talk and _lens_preset in _LENS_INST and not _is_custom_replace:
+                sp = _LENS_INST[_lens_preset] + "\n\n" + sp
+            if not is_talk and _lens_hier == "prefer_summary" and not _is_custom_replace:
+                sp = "【要約優先】回答は簡潔にまとめること。長文は避けよ。\n\n" + sp
+            _q.put({"type":"step","label":"回答を構築中..."})
+            gi = []
+            if _is_image_gen_request(req.message):
+                try: reply, gi = _generate_image(req.message)
+                except Exception as _e: reply = f"画像生成エラー: {_e}"
+            else:
+                msgs = history + [{"role":"user","content":req.message}]
+                try: reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier)
+                except Exception as _e: reply = f"エラー: {_e}"
+
+            _q.put({"type":"step","label":"回答を整形中..."})
+            cases = []
+            structured = None
+            import threading as _th_sec
+            _skip_secondary = ("429" in reply or "RESOURCE_EXHAUSTED" in reply or reply.startswith("エラー:") or len(reply) < 10)
+            _struct_res = {}
+            _cases_res = {}
+            def _run_structured():
+                try:
+                    _qpi2 = qp.get('intent','')
+                    _ci2 = {'相談','意思決定','分析','作成','予測','投資'}
+                    _iti2 = '雑談' in _qpi2
+                    _mf2 = _mk != 'auto'
+                    _isc2 = (not is_talk) and (_mf2 or ((not _iti2) and (any(i in _qpi2 for i in _ci2))))
+                    if not gi and _isc2:
+                        import json as _jss2, re as _rss2
+                        _mu2 = _mk.upper() if _mk != 'auto' else ''
+                        _ml2 = f'modeは必ず {_mu2} で固定（変更禁止）\n' if _mu2 else 'modeは問いの内容に応じてSTRATEGY/NUMERIC/DIAGNOSIS/PLANNING/RISK/MARKETING/FINANCE/HRから選択\n'
+                        _sp3 = (f'次のJSONキー構造のみで回答せよ。前置き禁止。コードブロック禁止。\n必須キー: summary, cards, analysis, actions, value_message\ncards必須キー: current(現状・背景を3件の文字列配列), risk(問題・リスクを3件の文字列配列), plan(推奨方針を3件の文字列配列)\nanalysis必須キー: type(論点タイプ1語), urgency(高/中/低), importance(高/中/低), mode(推奨モード名)\nactions: 即実行すべきアクションを3〜5件の文字列配列\n{_ml2}summary: 相談内容の本質的課題を2〜3行で具体的に記述\nvalue_message: このコンサルの価値を1行で\nQ: {req.message[:400]}\nA: {reply[:800]}')
+                        _sr2 = call_llm(system_prompt='JSONのみ出力。指定キー構造厳守。', messages=[{'role':'user','content':_sp3}], ai_tier='core', max_tokens=900)
+                        _m2 = _rss2.search(r'\{.*\}', _sr2, _rss2.DOTALL)
+                        if _m2:
+                            _p2 = _jss2.loads(_m2.group(0))
+                            if all(k in _p2 for k in ['summary','cards','analysis','actions','value_message']):
+                                _struct_res['v'] = _p2
+                except Exception:
+                    pass
+            def _run_cases():
+                try:
+                    if not gi:
+                        _cp2 = f'以下の会話に対して、ユーザーが次に相談しそうな事案を必ず3件、日本語で1行ずつ返せ。必ず3行出力すること。番号・記号・マーク不要。\nQ: {req.message}\nA: {reply[:500]}'
+                        print(f"[CASES_STREAM_START] is_talk={is_talk} skip={_skip_secondary}", flush=True)
+                        _cr2 = call_llm(system_prompt='必ず3行のみ出力。番号・記号・前置き禁止。3件未満は禁止。', messages=[{'role':'user','content':_cp2}], ai_tier='core', max_tokens=512)
+                        _cases_res['v'] = [l.strip() for l in _cr2.strip().split('\n') if l.strip()][:3]
+                        print(f"[CASES_STREAM_DONE] raw={repr(_cr2[:200])} count={len(_cases_res.get('v',[]))}", flush=True)
+                    else:
+                        print(f"[CASES_STREAM_SKIP] gi={bool(gi)}", flush=True)
+                except Exception as _ce2:
+                    print(f"[CASES_STREAM_ERROR] {type(_ce2).__name__}: {_ce2}", flush=True)
+            _ts2 = _th_sec.Thread(target=_run_structured, daemon=True)
+            if not _skip_secondary:
+                _ts2 = _th_sec.Thread(target=_run_structured, daemon=True)
+                _tc2 = _th_sec.Thread(target=_run_cases, daemon=True)
+                _ts2.start(); _tc2.start()
+                _tc2.join(timeout=20)
+                _ts2.join(timeout=15)
+            elif is_talk and not gi:
+                # 会話モードは_skip_secondaryでもcasesだけは必ず生成
+                _tc2 = _th_sec.Thread(target=_run_cases, daemon=True)
+                _tc2.start()
+                _tc2.join(timeout=20)
+            structured = _struct_res.get('v')
+            cases = _cases_res.get('v') or []
+            reply = __import__("re").sub(r" {2,}", " ", reply).strip()
+            _ss_sources = []
+            _RAG_THRESHOLD = 0.70  # 高確信度閾値
+            if _rc and not _plan_hit:
+                _ss_max = max((float(_sck.get("_score",0)) for _sck in _rc), default=0.0)
+                _ss_retrieved = _ss_max >= _RAG_THRESHOLD
+                print(f"[RAG_RETRIEVED][stream] max_score={_ss_max:.3f} is_retrieved={_ss_retrieved} chunks={len(_rc)}", flush=True)
+                _ss_sources=[{"text":(_sck.get("text","") or "")[:200],"score":float(_sck.get("_score",0)),"source_id":str(_sck.get("source_id","")),"is_retrieved":float(_sck.get("_score",0)) >= _RAG_THRESHOLD} for _sck in _rc]
+            elif _plan_hit:
+                _ss_sources = []
+            else:
+                _ss_sources = [{"text": "", "score": 0.0, "source_id": "", "is_retrieved": False}]
+            reply = _clean_reply(reply)
+            _save_message(tenant_id, uid, chat_id, "user", req.message)
+            _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured, images=gi, sources=_ss_sources)
+            try:
+                get_db().collection("usage_logs").add({"user_id":uid,"tenant_id":tenant_id,"prompt":req.message[:200],"timestamp":(datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),"is_admin_test":False})
+            except Exception:
+                pass
+            # intent_label: エラー時は空、正常時のみキーワード判定
+            _il = ""
+            if not (reply.startswith("エラー:") or "429" in reply or "RESOURCE_EXHAUSTED" in reply):
+                _mq = req.message
+                if any(w in _mq for w in ["投資","銘柄","株","相場","シグナル","底打ち"]):
+                    _il = "投資分析"
+                elif any(w in _mq for w in ["戦略","施策","差別化","競合","KPI","ROI"]):
+                    _il = "戦略相談"
+                elif any(w in _mq for w in ["分析","解析","調査","データ","原因"]):
+                    _il = "分析"
+                elif any(w in _mq for w in ["作成","生成","書いて","まとめ","作って"]):
+                    _il = "作成"
+                elif any(w in _mq for w in ["計画","ロードマップ","スケジュール","設計"]):
+                    _il = "意思決定"
+                else:
+                    _il = "相談"
+            # ist に Firestore Timestamp 等の非シリアライズ可能型が混入するのを防ぐ
+            try:
+                import json as _jsc
+                _ist_safe = _jsc.loads(_jsc.dumps(ist if isinstance(ist,dict) else {}, default=str))
+            except Exception:
+                _ist_safe = {}
+            _q.put({"type":"done","reply":reply,"chat_id":chat_id,"msg_id":str(uuid.uuid4()),"cases":cases,"images":gi,"structured":structured,"sources":_ss_sources,"intent":_ist_safe,"intent_label":_il})
+        except Exception as _e:
+            _q.put({"type":"error","message":str(_e)})
+        finally:
+            _q.put(_DONE)
+    _thm.Thread(target=_worker, daemon=True).start()
+    def _gen():
+        import time as _t
+        while True:
+            item = _q.get()
+            if item is _DONE: break
+            try:
+                if isinstance(item, dict) and item.get("type") == "done":
+                    print(f"[SSE_DONE_YIELD] reply_len={len(item.get('reply',''))} sources={len(item.get('sources',[]))} cases={item.get('cases',[])}", flush=True)
+                yield _sse_evt(item)
+                if isinstance(item, dict) and item.get("type") == "done":
+                    print(f"[SSE_DONE_YIELD_OK]", flush=True)
+            except Exception as _ge:
+                print(f"[SSE_GEN_ERR] {type(_ge).__name__}: {_ge}", flush=True)
+                if isinstance(item, dict) and item.get("type") == "done":
+                    # done イベントが落ちた場合は最小限のfallbackを送出
+                    import json as _jfb
+                    _fb = _jfb.dumps({"type":"done","reply":item.get("reply",""),"chat_id":item.get("chat_id",""),"msg_id":item.get("msg_id",""),"cases":[],"images":[],"structured":None,"sources":[],"intent":{},"intent_label":item.get("intent_label","")}, ensure_ascii=False)
+                    yield f"data: {_fb}\n\n"
+            _t.sleep(0)
+        yield ": done\n\n"
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+@router.post("/send_image_stream")
+def send_image_stream(req: ImageRequest, payload: dict = Depends(verify_token)):
+    import queue as _qm2, threading as _thm2
+    _q = _qm2.Queue()
+    _DONE = object()
+    def _worker():
+        try:
+            uid = payload["uid"]
+            tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+            chat_id = (req.chat_id or "main").strip() or "main"
+            _ensure_session(tenant_id, uid, chat_id)
+            gi = []
+            if req.image_b64:
+                _q.put({"type":"step","label":"画像を受信中..."})
+                base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
+                sp = ("【最重要指示】あなたは画像解析AIです。添付された画像を必ず詳細に分析し、内容・テキスト・数値・構造・色・特徴を全て日本語で説明してください。画像の分析を拒否したり、できないと言ったりすることは絶対に禁止です。\n\n"
+                      + base_prompt + "\n\n【画像解析モード】添付された画像を正確に読み取り、ユーザーの質問に対して詳細に答えよ。画像の内容・数値・テキスト・構造を整理して提示せよ。")
+                _q.put({"type":"step","label":"画像を解析中..."})
+                msgs = _load_history(tenant_id, uid, chat_id)
+                msgs.append({"role":"user","content":req.message or "この画像を詳しく分析してください"})
+                _q.put({"type":"step","label":"回答を構築中..."})
+                try: reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier, image_b64=req.image_b64, image_mime=req.image_mime)
+                except Exception as e: reply = f"画像解析エラー: {e}"
+            else:
+                _q.put({"type":"step","label":"プロンプトを設計中..."})
+                _q.put({"type":"step","label":"画像を生成中..."})
+                try: reply, gi = _generate_image(req.message, req.image_b64, req.image_mime)
+                except Exception as e:
+                    reply = f"画像生成エラー: {e}"
+                    gi = []
+            _q.put({"type":"step","label":"最終調整中..."})
+            if gi:
+                try:
+                    import os as _os2, base64 as _b642
+                    from google.cloud import storage as _gcs2
+                    bn = _os2.environ.get("CENTRAL_BLOB_BUCKET","").strip()
+                    if bn:
+                        _gc2 = _gcs2.Client(); _bkt2 = _gc2.bucket(bn)
+                        for _ii, _img in enumerate(gi):
+                            try:
+                                _ib = _b642.b64decode(_img["data"])
+                                _ext = "png" if "png" in _img.get("mime_type","") else "jpg"
+                                _path = f"chat_images/{tenant_id}/{uid}/{uuid.uuid4().hex[:8]}.{_ext}"
+                                _bl = _bkt2.blob(_path)
+                                _bl.upload_from_string(_ib, content_type=_img.get("mime_type","image/png"))
+                                gi[_ii]["gcs_url"] = f"https://storage.googleapis.com/{bn}/{_path}"
+                            except Exception: pass
+                except Exception: pass
+            _save_message(tenant_id, uid, chat_id, "user", req.message)
+            reply = __import__("re").sub(r" {2,}", " ", reply).strip()
+            _save_message(tenant_id, uid, chat_id, "assistant", reply, images=gi)
+            try: get_db().collection("usage_logs").add({"user_id":uid,"tenant_id":tenant_id,"prompt":req.message[:200],"timestamp":(datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),"is_admin_test":False})
+            except Exception: pass
+            _q.put({"type":"done","reply":reply,"chat_id":chat_id,"msg_id":str(uuid.uuid4()),"cases":[],"images":gi,"structured":None})
+        except Exception as _e:
+            _q.put({"type":"error","message":str(_e)})
+        finally:
+            _q.put(_DONE)
+    _thm2.Thread(target=_worker, daemon=True).start()
+    def _gen():
+        while True:
+            item = _q.get()
+            if item is _DONE: break
+            yield _sse_evt(item)
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+@router.post("/send_file_stream")
+def send_file_stream(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
+    import queue as _qm3, threading as _thm3
+    _q = _qm3.Queue()
+    _DONE = object()
+    def _worker():
+        try:
+            _q.put({"type":"step","label":"ファイルを受信中..."})
+            uid = payload["uid"]
+            tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+            chat_id = (req.chat_id or "main").strip() or "main"
+            _ensure_session(tenant_id, uid, chat_id)
+            base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
+            _cc = """あなたは超一流の経営コンサルタントであり、データ分析の専門家である。
+添付されたファイルの内容を必ず詳細に分析し、以下の観点でコンサルティング回答を提供せよ。
+【分析必須項目】
+1. データの構造・全体像を把握し簡潔に説明せよ
+2. 数値・トレンド・異常値・パターンを発見し指摘せよ
+3. 問題点・課題・改善余地を具体的に提示せよ
+4. 次のアクション・改善策・予測を根拠と共に提示せよ
+【禁止事項】
+- ファイルと無関係な話題への言及
+- 「できません」「対応しておりません」等の拒否
+- 曖昧・抽象的な回答
+【出力形式】
+- 結論を最初に述べ、根拠をデータから示せ
+- 数値は必ず引用し、比較・変化率・傾向を明示せよ
+- 実務で即使える具体的な提言を出せ"""
+            sp = (_cc + ("\n\n【業種別追加指示】\n" + base_prompt if base_prompt.strip() else "") +
+                  "\n\n【ファイル解析モード】添付ファイルの内容を正確に読み取り、ユーザーの質問に答えよ。数値・表・構造は必ず整理して提示せよ。")
+            _q.put({"type":"step","label":"内容を解析中..."})
+            fc = f"\n\n【添付ファイル: {req.filename}】\n{req.file_text[:8000]}" if req.file_text else ""
+            msgs = _load_history(tenant_id, uid, chat_id)
+            msgs.append({"role":"user","content":req.message + fc})
+            _q.put({"type":"step","label":"構造を把握中..."})
+            _q.put({"type":"step","label":"回答を構築中..."})
+            try: reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier)
+            except Exception as e: reply = f"ファイル解析エラー: {e}"
+            _q.put({"type":"step","label":"最終調整中..."})
+            _save_message(tenant_id, uid, chat_id, "user", req.message)
+            reply = __import__("re").sub(r" {2,}", " ", reply).strip()
+            _save_message(tenant_id, uid, chat_id, "assistant", reply)
+            try: get_db().collection("usage_logs").add({"user_id":uid,"tenant_id":tenant_id,"prompt":req.message[:200],"timestamp":(datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),"is_admin_test":False})
+            except Exception: pass
+            _q.put({"type":"done","reply":reply,"chat_id":chat_id,"msg_id":str(uuid.uuid4()),"cases":[],"images":[],"structured":None})
+        except Exception as _e:
+            _q.put({"type":"error","message":str(_e)})
+        finally:
+            _q.put(_DONE)
+    _thm3.Thread(target=_worker, daemon=True).start()
+    def _gen():
+        while True:
+            item = _q.get()
+            if item is _DONE: break
+            yield _sse_evt(item)
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+@router.get("/sources_log")
+def get_sources_log(payload: dict = Depends(verify_token)):
+    uid = payload["uid"]
+    tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+    db = get_db()
+    prefix = f"{SCOPE}__{tenant_id}__{uid}__"
+    result = []
+    try:
+        sessions = db.collection("chat_sessions").where("uid","==",uid).where("tenant_id","==",tenant_id).where("scope","==",SCOPE).limit(20).stream()
+        for sess in sessions:
+            sess_d = sess.to_dict() or {}
+            if sess_d.get("is_deleted"): continue
+            cid = sess_d.get("chat_id","main")
+            msgs = _messages_ref(tenant_id, uid, cid).order_by("ts").limit_to_last(10).get()
+            for m in msgs:
+                md = m.to_dict() or {}
+                if md.get("role")=="assistant" and md.get("sources"):
+                    for sc in md["sources"]:
+                        result.append(sc)
+    except Exception as e:
+        print(f"[SOURCES_LOG_ERROR] {e}", flush=True)
+    return {"sources": result[:30]}

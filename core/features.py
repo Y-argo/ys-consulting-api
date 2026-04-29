@@ -18,6 +18,7 @@ FEATURE_REGISTRY = {
     "diag_investment":         {"label": "投資シグナルタブ",   "category": "診断タブ",  "default_enabled": False},
     "diag_graph":              {"label": "思考マップタブ",     "category": "診断タブ",  "default_enabled": True},
     "diag_file":               {"label": "ファイル診断タブ",   "category": "診断タブ",  "default_enabled": True},
+    "diag_presentation":       {"label": "プレゼン資料タブ",   "category": "診断タブ",  "default_enabled": False},
 }
 
 # STARTER:0円 / STANDARD:9800円 / PRO:39800円 / APEX:89800円
@@ -48,6 +49,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_investment":         False,
         "diag_graph":              False,
         "diag_file":               False,
+        "diag_presentation":       False,
     },
     "standard": {
         "image_generation":        True,
@@ -66,6 +68,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_investment":         False,
         "diag_graph":              False,
         "diag_file":               False,
+        "diag_presentation":       False,
     },
     "pro": {
         "image_generation":        True,
@@ -84,6 +87,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_investment":         False,
         "diag_graph":              True,
         "diag_file":               True,
+        "diag_presentation":       False,
     },
     "apex": {
         "image_generation":        True,
@@ -102,6 +106,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_investment":         True,
         "diag_graph":              True,
         "diag_file":               True,
+        "diag_presentation":       True,
     },
     # ULTRA企業契約: メンバー=PRO相当、管理者=APEX相当
     "ultra_member": {
@@ -121,6 +126,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_investment":         False,
         "diag_graph":              True,
         "diag_file":               True,
+        "diag_presentation":       True,
     },
     "ultra_admin": {
         "image_generation":        True,
@@ -139,6 +145,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_investment":         True,
         "diag_graph":              True,
         "diag_file":               True,
+        "diag_presentation":       True,
     },
 }
 

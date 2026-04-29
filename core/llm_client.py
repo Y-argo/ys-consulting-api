@@ -9,6 +9,33 @@ import time as _time
 _model_cache: dict = {"models": set(), "ts": 0}
 _CACHE_TTL = 300
 
+# ── LLMレスポンスキャッシュ（同一クエリのRPM節約） ──
+import hashlib as _hashlib
+_llm_cache: dict = {}
+_LLM_CACHE_TTL = 300  # 5分
+
+def _make_cache_key(system_prompt: str, messages: list, ai_tier: str, max_tokens: int) -> str:
+    last_msg = messages[-1].get("content", "") if messages else ""
+    raw = f"{ai_tier}:{max_tokens}:{system_prompt[:200]}:{last_msg[:500]}"
+    return _hashlib.md5(raw.encode()).hexdigest()
+
+def _get_llm_cache(key: str):
+    import time as _t
+    entry = _llm_cache.get(key)
+    if entry and (_t.time() - entry["ts"]) < _LLM_CACHE_TTL:
+        print(f"[LLM_CACHE_HIT] key={key[:8]}", flush=True)
+        return entry["val"]
+    return None
+
+def _set_llm_cache(key: str, val: str):
+    import time as _t
+    _llm_cache[key] = {"val": val, "ts": _t.time()}
+    # 古いキャッシュを削除（最大100件）
+    if len(_llm_cache) > 100:
+        oldest = sorted(_llm_cache.items(), key=lambda x: x[1]["ts"])[:20]
+        for k, _ in oldest:
+            del _llm_cache[k]
+
 def _list_available_models_cached(client) -> set:
     now = _time.time()
     if _model_cache["models"] and (now - _model_cache["ts"]) < _CACHE_TTL:
@@ -26,8 +53,10 @@ _CORE_PREFERRED = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-001",
     "gemini-2.0-flash-latest",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
 ]
 # 画像解析専用モデル（visionサポート確認済み）
 _VISION_PREFERRED = [
@@ -38,14 +67,11 @@ _VISION_PREFERRED = [
 _ULTRA_PREFERRED = [
     "gemini-2.5-pro-preview-05-06",
     "gemini-2.5-pro",
-    "gemini-2.5-pro-latest",
-    "gemini-2.5-flash",
-    "gemini-2.0-pro",
+    "gemini-2.0-flash",
 ]
 _APEX_PREFERRED = [
-    "gemini-3.0-ultra",
-    "gemini-3.0-pro",
-    "gemini-3.0-flash",
+    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
     "gemini-2.5-pro-preview-05-06",
     "gemini-2.5-pro",
 ]
@@ -67,20 +93,6 @@ MODEL_TIERS = {
 def _get_client():
     api_key = os.environ.get("GEMINI_API_KEY", "")
     return genai.Client(api_key=api_key) if api_key else genai.Client()
-
-_model_cache: dict = {"models": set(), "expires": 0}
-
-def _list_available_models(client) -> set:
-    import time
-    global _model_cache
-    if _model_cache["models"] and time.time() < _model_cache["expires"]:
-        return _model_cache["models"]
-    try:
-        models = {m.name.split("/")[-1] for m in client.models.list()}
-        _model_cache = {"models": models, "expires": time.time() + 600}
-        return models
-    except Exception:
-        return _model_cache["models"] if _model_cache["models"] else set()
 
 def pick_model(ai_tier: str = "core") -> str:
     """利用可能なモデルからtiereに合ったものを選択。フォールバックあり"""
@@ -124,6 +136,11 @@ def call_llm(
     image_mime: str = "image/png",
     tenant_id: str = None,
 ) -> str:
+    # キャッシュチェック（secondary LLM呼び出しのRPM節約）
+    _ck = _make_cache_key(system_prompt, messages, ai_tier, max_tokens)
+    _cached = _get_llm_cache(_ck)
+    if _cached:
+        return _cached
     client = _get_client()
     model_name = pick_model(ai_tier)
 
@@ -159,27 +176,77 @@ def call_llm(
     except Exception:
         candidates = [model_name]
 
+    import time as _time, threading as _th_llm
     last_err = None
-    for candidate in candidates[:3]:
+    _TIMEOUT = 50
+    for candidate in candidates[:5]:
         try:
-            response = client.models.generate_content(
-                model=candidate,
-                contents=sdk_messages,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=temperature,
-                    max_output_tokens=max_tokens,
-                ),
-            )
-            _text = response.text
-            if not _text or not _text.strip():
-                last_err = Exception(f"{candidate}: 空レスポンス（モデルが無応答）")
+            _res_box = {}
+            _err_box = {}
+            def _do_call(c=candidate, r=_res_box, er=_err_box):
+                try:
+                    resp = client.models.generate_content(
+                        model=c,
+                        contents=sdk_messages,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt,
+                            temperature=temperature,
+                            max_output_tokens=max_tokens,
+                            safety_settings=[
+                                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
+                                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
+                                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
+                                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
+                            ],
+                        ),
+                    )
+                    _t2 = ""
+                    _finish_reason = ""
+                    try:
+                        _t2 = resp.text or ""
+                    except Exception:
+                        pass
+                    if not _t2 and resp.candidates:
+                        try:
+                            _finish_reason = str(resp.candidates[0].finish_reason)
+                            _t2 = resp.candidates[0].content.parts[0].text or ""
+                        except Exception:
+                            pass
+                    if not _t2:
+                        try:
+                            _cands = resp.candidates
+                            _pf = resp.prompt_feedback if hasattr(resp, 'prompt_feedback') else None
+                            _pf_str = str(_pf) if _pf else ""
+                            print(f"[LLM_EMPTY] model={c} finish_reason={_finish_reason} candidates={len(_cands) if _cands else 0} prompt_feedback={_pf_str}", flush=True)
+                            if "PROHIBITED_CONTENT" in _pf_str or "SAFETY" in _pf_str:
+                                last_err = Exception(f"{c}: コンテンツポリシーによりスキップ")
+                                print(f"[LLM_POLICY_SKIP] {c} → 次候補へ", flush=True)
+                        except Exception as _de:
+                            print(f"[LLM_EMPTY] model={c} debug_err={_de}", flush=True)
+                    r["v"] = _t2
+                except Exception as _ce:
+                    er["v"] = _ce
+            _t = _th_llm.Thread(target=_do_call, daemon=True)
+            _t.start()
+            _t.join(timeout=_TIMEOUT)
+            if _t.is_alive():
+                last_err = Exception(f"{candidate}: {_TIMEOUT}秒タイムアウト")
+                print(f"[LLM_TIMEOUT] {candidate}", flush=True)
                 continue
+            if "v" in _err_box:
+                raise _err_box["v"]
+            _text = _res_box.get("v", "")
+            if not _text or not _text.strip():
+                last_err = Exception(f"{candidate}: 空レスポンス")
+                continue
+            _set_llm_cache(_ck, _text)
             return _text
         except Exception as e:
             last_err = e
+            _e_str = str(e)
+            if '429' in _e_str or 'RESOURCE_EXHAUSTED' in _e_str:
+                print(f"[LLM_429] {candidate} 429 - skip to next", flush=True)
             continue
-
     raise Exception(f"全モデル失敗: {last_err}")
 
 def call_llm_pro(

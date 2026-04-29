@@ -111,26 +111,47 @@ def login(req: LoginRequest):
         token = _make_token(uid="admin", role="admin", tenant_id="default")
         return LoginResponse(token=token, uid="admin", role="admin", tenant_id="default")
     else:
-        if not _verify_user(req.uid, req.password):
+        # Firestoreを1回だけ取得して認証・有効期限・tenant_id をまとめて処理
+        import datetime as _dt_auth
+        _db = get_db()
+        _usnap = _db.collection("users").document(req.uid).get()
+        if not _usnap.exists:
+            raise HTTPException(status_code=403, detail="UID またはパスワードが正しくありません")
+        _ud = _usnap.to_dict() or {}
+        # パスワード検証
+        if not bool(_ud.get("is_active", True)):
+            raise HTTPException(status_code=403, detail="UID またはパスワードが正しくありません")
+        if not _verify_pw_pbkdf2(
+            req.password,
+            _ud.get("pw_salt", ""),
+            _ud.get("pw_hash", ""),
+            int(_ud.get("pw_iters", 150_000) or 150_000),
+        ):
             raise HTTPException(status_code=403, detail="UID またはパスワードが正しくありません")
         # 有効期限チェック
-        try:
-            from api.core.firestore_client import get_db as _gdb_auth
-            import datetime as _dt_auth
-            _usnap = _gdb_auth().collection("users").document(req.uid).get()
-            _ud = _usnap.to_dict() if _usnap.exists else {}
-            _is_unlimited = bool(_ud.get("is_unlimited", False))
-            _expires_at = str(_ud.get("expires_at", "")).strip()
-            if not _is_unlimited and _expires_at:
+        _is_unlimited = bool(_ud.get("is_unlimited", False))
+        _expires_at = str(_ud.get("expires_at", "")).strip()
+        if not _is_unlimited and _expires_at:
+            try:
                 _exp_date = _dt_auth.date.fromisoformat(_expires_at[:10])
                 if _dt_auth.date.today() > _exp_date:
                     raise HTTPException(status_code=403, detail="EXPIRED")
-        except HTTPException:
-            raise
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+        # tenant_id取得
+        tenant_id = _ud.get("tenant_id", "default") or "default"
+        token = _make_token(uid=req.uid, role="user", tenant_id=tenant_id)
+        # last_login更新
+        try:
+            import datetime as _dt_ll
+            _db.collection("users").document(req.uid).set(
+                {"last_login": _dt_ll.datetime.now(_dt_ll.timezone.utc)},
+                merge=True
+            )
         except Exception:
             pass
-        tenant_id = _get_user_tenant(req.uid)
-        token = _make_token(uid=req.uid, role="user", tenant_id=tenant_id)
         return LoginResponse(token=token, uid=req.uid, role="user", tenant_id=tenant_id)
 
 @router.post("/logout")

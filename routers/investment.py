@@ -209,14 +209,36 @@ def get_investment_analysis(payload: dict = Depends(verify_token)):
             "}"
         )
 
+        import re as _re, json as _json, time as _time
+        _cache_buster = str(int(_time.time()))
         res = call_llm(
-            system_prompt="あなたはファンダメンタルズとテクニカル両面に精通した戦略投資コンサルタントです。JSONのみ出力。",
+            system_prompt=f"あなたはファンダメンタルズとテクニカル両面に精通した戦略投資コンサルタントです。必ず純粋なJSONオブジェクトのみを出力すること。```json や ``` などのマークダウン記法は絶対に使用禁止。[{_cache_buster}]",
             messages=[{"role":"user","content":prompt}],
             ai_tier="core", max_tokens=2048
         )
-        import re as _re, json as _json
-        m = _re.search(r"\{.*\}", res, _re.DOTALL)
-        analysis = _json.loads(m.group(0)) if m else {"market_summary": res}
+        _res_clean = _re.sub(r"```json\s*", "", res.strip())
+        _res_clean = _re.sub(r"```", "", _res_clean).strip()
+        m = _re.search(r"\{.*\}", _res_clean, _re.DOTALL)
+        try:
+            analysis = _json.loads(m.group(0)) if m else {"market_summary": res}
+            # market_summaryが入れ子JSONになっている場合は再パース
+            _ms = analysis.get("market_summary", "")
+            if isinstance(_ms, str):
+                _ms_strip = _ms.strip()
+                if _ms_strip.startswith("{"):
+                    try:
+                        _inner = _json.loads(_ms_strip)
+                        if isinstance(_inner, dict) and "market_summary" in _inner:
+                            analysis = _inner
+                    except Exception:
+                        _m2 = _re.search(r"\{.*\}", _ms_strip, _re.DOTALL)
+                        if _m2:
+                            try:
+                                analysis = _json.loads(_m2.group(0))
+                            except Exception:
+                                pass
+        except Exception:
+            analysis = {"market_summary": res}
         
         return {
             "ok": True,
@@ -313,12 +335,17 @@ def stock_analysis(body: dict = Body(...), payload: dict = Depends(verify_token)
 
     try:
         res = call_llm(
-            system_prompt="あなたはファンダメンタルズとテクニカル両面に精通した戦略投資コンサルタントです。JSONのみ出力。",
+            system_prompt="あなたはファンダメンタルズとテクニカル両面に精通した戦略投資コンサルタントです。必ず純粋なJSONオブジェクトのみを出力すること。```json や ``` などのマークダウン記法は絶対に使用禁止。",
             messages=[{"role":"user","content":prompt}],
             ai_tier="core", max_tokens=2048
         )
-        m = _re.search(r"\{.*\}", res, _re.DOTALL)
-        result = _json.loads(m.group(0)) if m else {"summary": res}
+        _res_clean2 = _re.sub(r"```json\s*", "", res.strip())
+        _res_clean2 = _re.sub(r"```", "", _res_clean2).strip()
+        m = _re.search(r"\{.*\}", _res_clean2, _re.DOTALL)
+        try:
+            result = _json.loads(m.group(0)) if m else {"summary": res}
+        except Exception:
+            result = {"summary": res}
         return {"ok": True, "result": result, "raw_data": matched[0] if matched else None}
     except Exception as e:
         return {"ok": False, "error": str(e)}

@@ -2,7 +2,7 @@
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api.routers import auth, chat, diagnosis, user_stats, inquiry, ads
+from api.routers import auth, chat, diagnosis, user_stats, inquiry, ads, investment
 
 app = FastAPI(title="ASCEND API", version="1.0.0")
 
@@ -25,6 +25,7 @@ app.include_router(diagnosis.router)
 app.include_router(user_stats.router)
 app.include_router(inquiry.router)
 app.include_router(ads.router)
+app.include_router(investment.router)
 
 @app.get("/health")
 def health():
