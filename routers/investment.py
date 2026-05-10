@@ -12,7 +12,7 @@ def get_investment_signals(payload: dict = Depends(verify_token)):
     """最新の投資シグナルを取得"""
     db = get_db()
     try:
-        docs = list(db.collection("investment_signals").limit(20).stream())
+        docs = list(db.collection("investment_signals").limit(500).stream())
         docs.sort(key=lambda d: str((d.to_dict() or {}).get("asof_date","")), reverse=True)
         docs = docs[:1]
         if not docs:
@@ -138,7 +138,7 @@ def get_investment_analysis(payload: dict = Depends(verify_token)):
     from api.core.llm_client import call_llm
     db = get_db()
     try:
-        docs = list(db.collection("investment_signals").limit(30).stream())
+        docs = list(db.collection("investment_signals").limit(500).stream())
         docs.sort(key=lambda d: str((d.to_dict() or {}).get("asof_date","")), reverse=True)
         if not docs:
             return {"ok": False, "error": "データなし"}
@@ -263,7 +263,7 @@ def stock_analysis(body: dict = Body(...), payload: dict = Depends(verify_token)
     # Firestoreから該当銘柄を検索
     matched = []
     try:
-        docs = list(db.collection("investment_signals").limit(30).stream())
+        docs = list(db.collection("investment_signals").limit(500).stream())
         docs.sort(key=lambda d: str((d.to_dict() or {}).get("asof_date","")), reverse=True)
         if docs:
             doc_ref = db.collection("investment_signals").document(docs[0].id)

@@ -374,11 +374,14 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: 
                 pass
         if uid and is_apex_ultra:
             try:
-                user_chunks = rag_retrieve_chunks_with_vec(tenant_id=f"user__{uid}", query_vec=_query_vec, top_k=5, threshold=_rag_threshold)
-                existing_ids = {c.get("chunk_id") for c in chunks}
-                chunks = chunks + [c for c in user_chunks if c.get("chunk_id") not in existing_ids]
-            except Exception:
-                pass
+                print(f"[USER_RAG] uid={uid} tenant=user__{uid}", flush=True)
+                user_chunks = rag_retrieve_chunks_with_vec(tenant_id=f"user__{uid}", query_vec=_query_vec, top_k=_rag_top_k, threshold=_rag_threshold)
+                print(f"[USER_RAG] user_chunks={len(user_chunks)}", flush=True)
+                for _uc in user_chunks: print(f"[USER_RAG_SRC] {_uc.get('source_id','')} score={_uc.get('_score',0):.3f}", flush=True)
+                existing_ids = {c.get("chunk_id") for c in user_chunks}
+                chunks = user_chunks + [c for c in chunks if c.get("chunk_id") not in existing_ids]
+            except Exception as _ue:
+                print(f"[USER_RAG ERROR] {_ue}", flush=True)
         # APEX/ULTRA専用ナレッジが空の場合 → 中央倉庫(default)にフォールバック
         if is_apex_ultra and not chunks:
             try:
@@ -595,7 +598,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
                 "出力形式：結論→打ち手→優先順位→リスク→次の観測。",
                 "出力形式：自然な会話形式で簡潔に回答せよ。箇条書きや表は使わず、2〜4文程度で答えよ。"
             ) + "\n\n【会話モード】雑談・日常会話として自然に短く返答せよ。分析・構造化・戦略提案は不要。"
-    _RAG_THRESHOLD = 0.70  # 高確信度閾値: これ以上のスコアのみis_retrieved=True
+    _RAG_THRESHOLD = 0.70  # 高確信度閾値（取得判定用）（取得判定用・検証フラグとは別）
     _max_rag_score = max((c.get("_score", 0) for c in _rag_chunks), default=0.0) if _rag_chunks else 0.0
     print(f"[RAG_VERIFY] chunks={len(_rag_chunks)} max_score={_max_rag_score:.3f}", flush=True)
     system_prompt = system_prompt + intent_ctx
@@ -812,7 +815,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _sources = []
     if _rag_chunks and not generated_images:
         _max_sc = max((float(c.get("_score",0)) for c in _rag_chunks), default=0.0)
-        _is_retrieved = _max_sc >= _RAG_THRESHOLD
+        _is_retrieved = len(_rag_chunks) > 0
         print(f"[RAG_RETRIEVED] max_score={_max_sc:.3f} is_retrieved={_is_retrieved} chunks={len(_rag_chunks)}", flush=True)
         _RAG_USE_THRESHOLD = 0.3  # 実際に使われた閾値
         _sources = [
@@ -1149,7 +1152,7 @@ AI: {req.last_reply[:300]}
 # ── 画像生成判定 ──────────────────────────────────────────────
 _IMAGE_WORDS = ["画像","イメージ","イラスト","ロゴ","アイコン","バナー","ポスター","サムネ","image","illustration","logo","icon","banner","poster"]
 _ACTION_WORDS = ["作って","描いて","描画","デザイン","作る","generate","draw","design","render"]
-_EDIT_WORDS = ["編集","加工","修正","変換","背景","切り抜","色変更","edit","modify","restyle"]
+_EDIT_WORDS = ["編集","加工","修正","変換","背景","切り抜","色変更","変えろ","変える","変え","差し替","置き換","影","シルエット","陰","塗り替","合成","edit","modify","restyle","change","replace","swap"]
 _ANALYSIS_WORDS = ["解析","分析","要約","読んで","説明","pdf","spreadsheet","excel","スプレッドシート"]
 
 def _is_image_gen_request(text: str, has_image: bool = False) -> bool:
@@ -1417,7 +1420,7 @@ def save_feedback(req: FeedbackRequest, payload: dict = Depends(verify_token)):
 # ── 画像生成判定 ──────────────────────────────────────────────
 _IMAGE_WORDS = ["画像","イメージ","イラスト","ロゴ","アイコン","バナー","ポスター","サムネ","image","illustration","logo","icon","banner","poster"]
 _ACTION_WORDS = ["作って","描いて","描画","デザイン","作る","generate","draw","design","render"]
-_EDIT_WORDS = ["編集","加工","修正","変換","背景","切り抜","色変更","edit","modify","restyle"]
+_EDIT_WORDS = ["編集","加工","修正","変換","背景","切り抜","色変更","変えろ","変える","変え","差し替","置き換","影","シルエット","陰","塗り替","合成","edit","modify","restyle","change","replace","swap"]
 _ANALYSIS_WORDS = ["解析","分析","要約","読んで","説明","pdf","spreadsheet","excel","スプレッドシート"]
 
 
@@ -1492,9 +1495,11 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
             pass
     # Firestoreに画像記録
     _db_si = get_db()
+    print(f"[GALLERY_SI_DEBUG] generated_images count: {len(generated_images)}", flush=True)
     for _img in generated_images:
         try:
             _img_id = uuid.uuid4().hex
+            print(f"[GALLERY_SI_DEBUG] saving uid={uid} gcs_url={_img.get('gcs_url','')[:60]}", flush=True)
             _db_si.collection("image_gallery").document(uid).collection("images").document(_img_id).set({
                 "image_id": _img_id,
                 "uid": uid,
@@ -1504,8 +1509,9 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
                 "prompt": (req.message or "")[:500],
                 "created_at": __import__("datetime").datetime.utcnow().isoformat(),
             })
-        except Exception:
-            pass
+            print(f"[GALLERY_SI_DEBUG] Firestore save OK", flush=True)
+        except Exception as _ge:
+            print(f"[GALLERY_SI_DEBUG] Firestore save ERROR: {_ge}", flush=True)
     _save_message(tenant_id, uid, chat_id, "user", req.message)
     reply = __import__("re").sub(r" {2,}", " ", reply).strip()
     _save_message(tenant_id, uid, chat_id, "assistant", reply, images=generated_images)
@@ -2073,9 +2079,9 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
             _RAG_THRESHOLD = 0.70  # 高確信度閾値
             if _rc and not _plan_hit:
                 _ss_max = max((float(_sck.get("_score",0)) for _sck in _rc), default=0.0)
-                _ss_retrieved = _ss_max >= _RAG_THRESHOLD
+                _ss_retrieved = len(_rc) > 0
                 print(f"[RAG_RETRIEVED][stream] max_score={_ss_max:.3f} is_retrieved={_ss_retrieved} chunks={len(_rc)}", flush=True)
-                _ss_sources=[{"text":(_sck.get("text","") or "")[:200],"score":float(_sck.get("_score",0)),"source_id":str(_sck.get("source_id","")),"is_retrieved":float(_sck.get("_score",0)) >= _RAG_THRESHOLD} for _sck in _rc]
+                _ss_sources=[{"text":(_sck.get("text","") or "")[:200],"score":float(_sck.get("_score",0)),"source_id":str(_sck.get("source_id","")),"is_retrieved":True} for _sck in _rc]
             elif _plan_hit:
                 _ss_sources = []
             else:
@@ -2150,7 +2156,7 @@ def send_image_stream(req: ImageRequest, payload: dict = Depends(verify_token)):
             chat_id = (req.chat_id or "main").strip() or "main"
             _ensure_session(tenant_id, uid, chat_id)
             gi = []
-            if req.image_b64:
+            if req.image_b64 and not _is_image_gen_request(req.message, has_image=True):
                 _q.put({"type":"step","label":"画像を受信中..."})
                 base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
                 sp = ("【最重要指示】あなたは画像解析AIです。添付された画像を必ず詳細に分析し、内容・テキスト・数値・構造・色・特徴を全て日本語で説明してください。画像の分析を拒否したり、できないと言ったりすることは絶対に禁止です。\n\n"
@@ -2186,6 +2192,23 @@ def send_image_stream(req: ImageRequest, payload: dict = Depends(verify_token)):
                                 gi[_ii]["gcs_url"] = f"https://storage.googleapis.com/{bn}/{_path}"
                             except Exception: pass
                 except Exception: pass
+            # Firestoreに画像記録
+            _db_sis = get_db()
+            for _img in gi:
+                try:
+                    _img_id = uuid.uuid4().hex
+                    _db_sis.collection("image_gallery").document(uid).collection("images").document(_img_id).set({
+                        "image_id": _img_id,
+                        "uid": uid,
+                        "tenant_id": tenant_id,
+                        "gcs_url": _img.get("gcs_url",""),
+                        "mime_type": _img.get("mime_type","image/png"),
+                        "prompt": (req.message or "")[:500],
+                        "created_at": __import__("datetime").datetime.utcnow().isoformat(),
+                    })
+                    print(f"[GALLERY_STREAM_DEBUG] Firestore save OK uid={uid}", flush=True)
+                except Exception as _ge:
+                    print(f"[GALLERY_STREAM_DEBUG] Firestore save ERROR: {_ge}", flush=True)
             _save_message(tenant_id, uid, chat_id, "user", req.message)
             reply = __import__("re").sub(r" {2,}", " ", reply).strip()
             _save_message(tenant_id, uid, chat_id, "assistant", reply, images=gi)

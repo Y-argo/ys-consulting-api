@@ -82,7 +82,7 @@ def get_user_stats(payload: dict = Depends(verify_token)):
         _DEFAULT_WEIGHTS = {"Q": 30, "R": 20, "S": 15, "V": 15, "P": 10, "E": 10}
         _w = {k: float(v) / 100.0 for k, v in _DEFAULT_WEIGHTS.items()}
 
-        _logs_raw = list(db.collection("usage_logs").where("user_id","==",uid).limit(200).stream())
+        _logs_raw = list(db.collection("usage_logs").where("user_id","==",uid).stream())
         _logs = [l for l in _logs_raw if not (l.to_dict() or {}).get("is_admin_test")][:60]
         turn_count = len(_logs)
         avg_prompt_len = 0.0
@@ -155,7 +155,6 @@ def get_user_stats(payload: dict = Depends(verify_token)):
         logs = list(
             db.collection("usage_logs")
             .where("user_id", "==", uid)
-            .limit(500)
             .stream()
         )
         total_chat_count = len([l for l in logs if not (l.to_dict() or {}).get("is_admin_test")])
@@ -204,7 +203,7 @@ def get_usage_logs(payload: dict = Depends(verify_token)):
     uid = payload["uid"]
     db = get_db()
     try:
-        docs = list(db.collection("usage_logs").where("user_id", "==", uid).limit(500).stream())
+        docs = list(db.collection("usage_logs").where("user_id", "==", uid).limit(2000).stream())
         logs = []
         for d in docs:
             data = d.to_dict() or {}
@@ -309,7 +308,7 @@ def get_fc_report(payload: dict = Depends(verify_token)):
         use_count = int(d.get("use_count_since_report", 0))
         existing = d.get("latest_fc_report")
         fc_threshold = 12
-        if use_count >= fc_threshold and not existing:
+        if use_count >= fc_threshold:
             try:
                 from api.core.llm_client import call_llm as _cllm
                 from api.core.firestore_client import get_db as _gdb
@@ -716,7 +715,7 @@ def get_user_stats(payload: dict = Depends(verify_token)):
         _DEFAULT_WEIGHTS = {"Q": 30, "R": 20, "S": 15, "V": 15, "P": 10, "E": 10}
         _w = {k: float(v) / 100.0 for k, v in _DEFAULT_WEIGHTS.items()}
 
-        _logs_raw = list(db.collection("usage_logs").where("user_id","==",uid).limit(200).stream())
+        _logs_raw = list(db.collection("usage_logs").where("user_id","==",uid).stream())
         _logs = [l for l in _logs_raw if not (l.to_dict() or {}).get("is_admin_test")][:60]
         turn_count = len(_logs)
         avg_prompt_len = 0.0
@@ -785,7 +784,6 @@ def get_user_stats(payload: dict = Depends(verify_token)):
         logs = list(
             db.collection("usage_logs")
             .where("user_id", "==", uid)
-            .limit(500)
             .stream()
         )
         total_chat_count = len([l for l in logs if not (l.to_dict() or {}).get("is_admin_test")])
@@ -834,7 +832,7 @@ def get_usage_logs(payload: dict = Depends(verify_token)):
     uid = payload["uid"]
     db = get_db()
     try:
-        docs = list(db.collection("usage_logs").where("user_id", "==", uid).limit(500).stream())
+        docs = list(db.collection("usage_logs").where("user_id", "==", uid).limit(2000).stream())
         logs = []
         for d in docs:
             data = d.to_dict() or {}
@@ -939,7 +937,7 @@ def get_fc_report(payload: dict = Depends(verify_token)):
         use_count = int(d.get("use_count_since_report", 0))
         existing = d.get("latest_fc_report")
         fc_threshold = 12
-        if use_count >= fc_threshold and not existing:
+        if use_count >= fc_threshold:
             try:
                 from api.core.llm_client import call_llm as _cllm
                 from api.core.firestore_client import get_db as _gdb
@@ -1455,7 +1453,7 @@ def deep_delete_account(payload: dict = Depends(verify_token)):
 
 
 @router.get("/session_timeout")
-def get_session_timeout(payload: dict = Depends(verify_token)):
+def get_session_timeout():
     """セッションタイムアウト設定を取得"""
     db = get_db()
     DEFAULT_TIMEOUT = 15
@@ -1800,7 +1798,7 @@ def get_user_knowledge_list(payload: dict = Depends(verify_token)):
     db = get_db()
     user_tenant = f"user__{uid}"
     try:
-        links = list(db.collection("tenant_source_links").where("tenant_id", "==", user_tenant).limit(60).stream())
+        links = list(db.collection("tenant_source_links").where("tenant_id", "==", user_tenant).limit(99).stream())
         result = []
         for lnk in links:
             ld = lnk.to_dict() or {}
@@ -1917,17 +1915,20 @@ async def upload_user_knowledge(
             continue
         try:
             emb = _embed_text(chunk)
+            import struct as _struct
+            emb_bytes = _struct.pack(f"{len(emb)}f", *emb)
             cid = f"{source_id}_c{ci}"
             db.collection("source_chunks").document(cid).set({
-                "chunk_id":    cid,
-                "doc_id":      source_id,
-                "source_id":   source_id,
-                "title":       fname,
-                "text":        chunk,
-                "embedding":   emb,
-                "category":    "ユーザー知識",
-                "source_type": "file",
-                "chunk_index": ci,
+                "chunk_id":        cid,
+                "doc_id":          source_id,
+                "source_id":       source_id,
+                "tenant_id":       user_tenant,
+                "title":           fname,
+                "text":            chunk,
+                "embedding_bytes": emb_bytes,
+                "category":        "ユーザー知識",
+                "source_type":     "file",
+                "chunk_index":     ci,
             }, merge=True)
             wrote += 1
         except Exception as _chunk_e:
@@ -1956,16 +1957,19 @@ async def upload_user_knowledge(
                 if _summary_text:
                     _summary_id = f"{source_id}__summary__{_si}"
                     _semb = _embed_text(_summary_text)
+                    import struct as _struct2
+                    _semb_bytes = _struct2.pack(f"{len(_semb)}f", *_semb)
                     db.collection("source_chunks").document(_summary_id).set({
-                        "chunk_id":    _summary_id,
-                        "doc_id":      source_id,
-                        "source_id":   source_id,
-                        "title":       fname,
-                        "text":        _summary_text,
-                        "embedding":   _semb,
-                        "category":    "ユーザー知識",
-                        "source_type": "summary",
-                        "chunk_index": -1 - _si,
+                        "chunk_id":        _summary_id,
+                        "doc_id":          source_id,
+                        "source_id":       source_id,
+                        "tenant_id":       user_tenant,
+                        "title":           fname,
+                        "text":            _summary_text,
+                        "embedding_bytes": _semb_bytes,
+                        "category":        "ユーザー知識",
+                        "source_type":     "summary",
+                        "chunk_index":     -1 - _si,
                     }, merge=True)
                     summaries_wrote += 1
             except Exception as _sum_e:
@@ -2190,6 +2194,22 @@ def generate_slides(body: dict = Body(...), payload: dict = Depends(verify_token
         if c2.endswith("```"): c2 = "\n".join(c2.split("\n")[:-1])
         data = _json.loads(c2)
         data["logic_skeleton"] = logic
+        # 自動保存（履歴）
+        try:
+            import datetime as _dt_ps
+            _db_ps = get_db()
+            _doc_id_ps = _dt_ps.datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
+            _save_data = {k: v for k, v in data.items() if k != "logic_skeleton"}
+            _db_ps.document(f"users/{uid}/presentation_history/{_doc_id_ps}").set({
+                "doc_id": _doc_id_ps, "uid": uid,
+                "title": data.get("title", ""), "subtitle": data.get("subtitle", ""),
+                "slide_count": len(data.get("slides", [])),
+                "data": _save_data,
+                "input_summary": (decision_goal or "")[:50],
+                "created_at": _dt_ps.datetime.now().isoformat(),
+            })
+        except Exception as _e_ps:
+            print(f"[SAVE ERROR presentation] {_e_ps}")
         return {"ok": True, "data": data}
     except _json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"Stage2 JSON解析エラー: {str(e)}")
@@ -2291,6 +2311,22 @@ def generate_event_plan(body: dict = Body(...), payload: dict = Depends(verify_t
         if cleaned.startswith("```"): cleaned = "\n".join(cleaned.split("\n")[1:])
         if cleaned.endswith("```"): cleaned = "\n".join(cleaned.split("\n")[:-1])
         data = _json.loads(cleaned)
+        # 自動保存（履歴）
+        try:
+            import datetime as _dt_ep
+            _db_ep = get_db()
+            _doc_id_ep = _dt_ep.datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
+            _db_ep.document(f"users/{uid}/event_plan_history/{_doc_id_ep}").set({
+                "doc_id": _doc_id_ep, "uid": uid,
+                "event_name": event_name or data.get("title", ""),
+                "title": data.get("title", ""), "subtitle": data.get("subtitle", ""),
+                "section_count": len(data.get("sections", [])),
+                "data": data,
+                "input_summary": (event_purpose or event_name or "")[:50],
+                "created_at": _dt_ep.datetime.now().isoformat(),
+            })
+        except Exception as _e_ep:
+            print(f"[SAVE ERROR event_plan] {_e_ep}")
         return {"ok": True, "data": data}
     except _json.JSONDecodeError as e:
         raise HTTPException(status_code=500, detail=f"JSON解析エラー: {str(e)}")
@@ -2351,3 +2387,80 @@ def generate_slides_stage1(body: dict = Body(...), payload: dict = Depends(verif
         return {"ok": True, "logic": _json.loads(c)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/presentation_history_list")
+def presentation_history_list(payload: dict = Depends(verify_token)):
+    uid = payload.get("uid", "")
+    if not uid: raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    try:
+        docs = list(db.document(f"users/{uid}").collection("presentation_history").limit(30).stream())
+        items = [d.to_dict() for d in docs]
+        items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        for item in items: item.pop("data", None)
+        return {"ok": True, "items": items}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.get("/presentation_history_get/{doc_id}")
+def presentation_history_get(doc_id: str, payload: dict = Depends(verify_token)):
+    uid = payload.get("uid", "")
+    if not uid: raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    try:
+        doc = db.document(f"users/{uid}/presentation_history/{doc_id}").get()
+        if not doc.exists: raise HTTPException(status_code=404, detail="履歴が見つかりません")
+        return {"ok": True, "item": doc.to_dict()}
+    except HTTPException: raise
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.delete("/presentation_history_delete/{doc_id}")
+def presentation_history_delete(doc_id: str, payload: dict = Depends(verify_token)):
+    uid = payload.get("uid", "")
+    if not uid: raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    try:
+        db.document(f"users/{uid}/presentation_history/{doc_id}").delete()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.get("/event_plan_history_list")
+def event_plan_history_list(payload: dict = Depends(verify_token)):
+    uid = payload.get("uid", "")
+    if not uid: raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    try:
+        docs = list(db.document(f"users/{uid}").collection("event_plan_history").limit(30).stream())
+        items = [d.to_dict() for d in docs]
+        items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        for item in items: item.pop("data", None)
+        return {"ok": True, "items": items}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.get("/event_plan_history_get/{doc_id}")
+def event_plan_history_get(doc_id: str, payload: dict = Depends(verify_token)):
+    uid = payload.get("uid", "")
+    if not uid: raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    try:
+        doc = db.document(f"users/{uid}/event_plan_history/{doc_id}").get()
+        if not doc.exists: raise HTTPException(status_code=404, detail="履歴が見つかりません")
+        return {"ok": True, "item": doc.to_dict()}
+    except HTTPException: raise
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.delete("/event_plan_history_delete/{doc_id}")
+def event_plan_history_delete(doc_id: str, payload: dict = Depends(verify_token)):
+    uid = payload.get("uid", "")
+    if not uid: raise HTTPException(status_code=401, detail="uid必須")
+    db = get_db()
+    try:
+        db.document(f"users/{uid}/event_plan_history/{doc_id}").delete()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

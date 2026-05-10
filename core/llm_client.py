@@ -178,7 +178,7 @@ def call_llm(
 
     import time as _time, threading as _th_llm
     last_err = None
-    _TIMEOUT = 50
+    _TIMEOUT = 90
     for candidate in candidates[:5]:
         try:
             _res_box = {}
