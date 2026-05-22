@@ -1,5 +1,5 @@
 # api/routers/user_stats.py
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body, Request
 from google.cloud import firestore as fs
 from api.routers.auth import verify_token
 from api.core.firestore_client import get_db, DEFAULT_TENANT
@@ -34,6 +34,7 @@ ALL_PURPOSE_MODES = {
     "hr":          "HR（人材/組織）",
     "ops":         "OPS（業務改善/効率化）",
     "tech":        "TECH（技術/エンジニア）",
+    "ascend":      "ASCEND（機能・使い方）",
 }
 
 def _load_rank_config(tenant_id: str) -> dict:
@@ -61,6 +62,319 @@ def _rank_next_pt(rank_name: str, score: int, cfg: dict) -> str:
         cfg["rank_3_name"]: cfg["rank_3_threshold"] + 1,
     }
     return f"{thresholds.get(rank_name, cfg['rank_1_threshold'] + 1) - score} pt"
+
+
+def _build_quality_scores(
+    rag_cnt=0, crm_feedback_cnt=0, crm_realtime_cnt=0, cust_cnt=0,
+    chat_cnt=0, diag_cnt=0, purpose_cnt=0, presentation_cnt=0, investment_cnt=0,
+    graph_cnt=0, table_cnt=0
+):
+    try:
+        rag_quality       = min(rag_cnt * 12 + (20 if rag_cnt > 3 else 0), 100)
+        crm_quality       = min(crm_feedback_cnt * 15 + crm_realtime_cnt * 10 + cust_cnt * 8, 100)
+        reasoning_quality = min(chat_cnt // 5 + purpose_cnt * 8 + diag_cnt * 6, 100)
+        llm_quality       = min(chat_cnt // 8 + purpose_cnt * 5, 100)
+        presentation_quality = min(presentation_cnt * 20, 100)
+        investment_quality   = min(investment_cnt * 15, 100)
+        return {
+            "rag_quality":          min(rag_quality, 100),
+            "crm_quality":          min(crm_quality, 100),
+            "reasoning_quality":    min(reasoning_quality, 100),
+            "llm_quality":          min(llm_quality, 100),
+            "presentation_quality": min(presentation_quality, 100),
+            "investment_quality":   min(investment_quality, 100),
+        }
+    except Exception:
+        return {}
+
+
+def _build_success_scores(
+    crm_feedback_cnt=0, cust_cnt=0, dm_data=None, diag_cnt=0, purpose_cnt=0
+):
+    try:
+        crm_success      = min(crm_feedback_cnt * 15 + cust_cnt * 8, 100)
+        dm_s = float((dm_data or {}).get("structural_intelligence", 0))
+        dm_e = float((dm_data or {}).get("execution_consistency", 0))
+        decision_success = min(int(dm_s * 0.6) + diag_cnt * 6, 100)
+        execution_success = min(int(dm_e * 0.6) + crm_feedback_cnt * 8, 100)
+        learning_success  = min(purpose_cnt * 10 + diag_cnt * 5, 100)
+        return {
+            "crm_success":       min(crm_success, 100),
+            "decision_success":  min(decision_success, 100),
+            "execution_success": min(execution_success, 100),
+            "learning_success":  min(learning_success, 100),
+        }
+    except Exception:
+        return {}
+
+
+def _build_adoption_scores(
+    rag_cnt=0, cust_cnt=0, future_cnt=0, diag_cnt=0, lgbm_cnt=0
+):
+    try:
+        rag_adoption       = min(rag_cnt * 12, 100)
+        crm_adoption       = min(cust_cnt * 12, 100)
+        future_adoption    = min(future_cnt * 20, 100)
+        diagnosis_adoption = min(diag_cnt * 10, 100)
+        lgbm_adoption      = min(lgbm_cnt * 25, 100)
+        return {
+            "rag_adoption":       min(rag_adoption, 100),
+            "crm_adoption":       min(crm_adoption, 100),
+            "future_adoption":    min(future_adoption, 100),
+            "diagnosis_adoption": min(diagnosis_adoption, 100),
+            "lgbm_adoption":      min(lgbm_adoption, 100),
+        }
+    except Exception:
+        return {}
+
+
+def _build_intelligence_scores(
+    dm_data=None, diag_cnt=0, rag_cnt=0, graph_cnt=0, table_cnt=0,
+    future_cnt=0, investment_cnt=0, crm_feedback_cnt=0, purpose_cnt=0,
+    future_quality_score=0,
+):
+    try:
+        dm_s = float((dm_data or {}).get("structural_intelligence", 0))
+        dm_e = float((dm_data or {}).get("execution_consistency", 0))
+        structural_depth        = min(int(dm_s * 0.5) + diag_cnt * 5 + rag_cnt * 4 + graph_cnt * 6 + table_cnt * 6, 100)
+        contradiction_awareness = min(int(dm_s * 0.4) + purpose_cnt * 5, 100)
+        future_reasoning        = min(int(future_quality_score * 0.75) + min(future_cnt * 4, 20) + investment_cnt * 8, 100)
+        execution_intelligence  = min(int(dm_e * 0.5) + crm_feedback_cnt * 8, 100)
+        cross_domain_transfer   = min(purpose_cnt * 6 + (diag_cnt + rag_cnt + graph_cnt) * 3, 100)
+        return {
+            "structural_depth":        min(structural_depth, 100),
+            "contradiction_awareness": min(contradiction_awareness, 100),
+            "future_reasoning":        min(future_reasoning, 100),
+            "execution_intelligence":  min(execution_intelligence, 100),
+            "cross_domain_transfer":   min(cross_domain_transfer, 100),
+        }
+    except Exception:
+        return {}
+
+
+def _build_system_intelligence(overall=0, quality_scores=None, success_scores=None, adoption_scores=None, intelligence_scores=None):
+    try:
+        def _avg(d):
+            if not d: return 0
+            vals = [v for v in d.values() if isinstance(v, (int, float))]
+            return round(sum(vals) / len(vals)) if vals else 0
+        q_avg = _avg(quality_scores)
+        s_avg = _avg(success_scores)
+        a_avg = _avg(adoption_scores)
+        i_avg = _avg(intelligence_scores)
+        system_score = min(round(overall * 0.4 + q_avg * 0.2 + i_avg * 0.25 + s_avg * 0.15), 100)
+        return {
+            "usage_maturity":        overall,
+            "quality_maturity":      q_avg,
+            "success_maturity":      s_avg,
+            "adoption_maturity":     a_avg,
+            "intelligence_maturity": i_avg,
+            "system_score":          system_score,
+            "phase":                 2,
+            "phase_label":           "quality-integrated maturity",
+        }
+    except Exception:
+        return {}
+
+
+def _calc_future_quality(uid: str, db) -> int:
+    """future_simulations から品質スコアを算出する共通関数"""
+    try:
+        _fsims_raw = list(db.collection("future_simulations").where("uid","==",uid).limit(50).stream())
+        def _fs_ts(s):
+            v = (s.to_dict() or {}).get("created_at","")
+            return str(v)
+        _fsims = sorted(_fsims_raw, key=_fs_ts, reverse=True)[:20]
+        _fq_total = 0
+        _fq_count = 0
+        for _fs in _fsims:
+            _fr = (_fs.to_dict() or {}).get("result", {})
+            _fq = 0
+            # branches品質
+            _brs = _fr.get("branches", [])
+            if len(_brs) >= 4: _fq += 10
+            # state_transition: 3段階以上 かつ 各状態15文字以上
+            _st_ok = any(
+                isinstance(b.get("state_transition"), list) and
+                len(b.get("state_transition", [])) >= 3 and
+                all(len(str(st)) >= 15 for st in b.get("state_transition", []))
+                for b in _brs
+            )
+            if _st_ok: _fq += 10
+            # short/mid/long_term: 各15文字以上
+            _sml_ok = any(
+                len(str(b.get("short_term",""))) >= 15 and
+                len(str(b.get("mid_term",""))) >= 15 and
+                len(str(b.get("long_term",""))) >= 15
+                for b in _brs
+            )
+            if _sml_ok: _fq += 10
+            if any(b.get("required_resources") for b in _brs): _fq += 5
+            if any(b.get("collapse_risk") for b in _brs): _fq += 5
+            # score_basis: 60文字以上
+            if any(len(str(b.get("score_basis",""))) >= 60 for b in _brs): _fq += 10
+            # causal品質: cause/effect両方20文字以上のチェーンが2件以上
+            _ca = _fr.get("causal_analysis", {})
+            if _ca: _fq += 10
+            _chain = _ca.get("causal_chain", [])
+            _dense_chain = [c for c in _chain if len(str(c.get("cause",""))) >= 20 and len(str(c.get("effect",""))) >= 20]
+            if len(_dense_chain) >= 2: _fq += 10
+            if _ca.get("warning_signs"): _fq += 5
+            # realism品質
+            _sb = _fr.get("simulation_basis", {})
+            _conf = str(_sb.get("confidence",""))
+            _miss = _sb.get("missing_information", [])
+            _asmp = _sb.get("assumptions", [])
+            _conf_valid = _sb and _conf not in ["低","不明",""]
+            _miss_valid = isinstance(_miss, list) and len(_miss) >= 2
+            _asmp_valid = isinstance(_asmp, list) and len(_asmp) >= 1
+            if _conf_valid: _fq += 10
+            if _miss_valid: _fq += 5
+            if _sb and _asmp_valid: _fq += 5  # simulation_basis + assumptions存在
+            # consistency品質: summary/current_alignment/sustainability/low_collapse_reason の4項目必須
+            _rr = _fr.get("recommended_reason", "")
+            if isinstance(_rr, dict):
+                _rr_keys = {"summary","current_alignment","sustainability","low_collapse_reason"}
+                _rr_filled = all(len(str(_rr.get(k,""))) >= 10 for k in _rr_keys)
+                if _rr_filled: _fq += 5
+                else: _fq += 2
+            _fq_total += min(_fq, 100)
+            _fq_count += 1
+        if _fq_count > 0:
+            return int(_fq_total / _fq_count)
+        return 0
+    except Exception:
+        return 0
+
+def _build_maturity(
+    chat_cnt, diag_cnt, dm_data, fc_score, profile_cnt, cust_cnt, file_diag_cnt, future_cnt,
+    rag_cnt=0, presentation_cnt=0, image_cnt=0, investment_cnt=0, inquiry_cnt=0,
+    table_cnt=0, graph_cnt=0, purpose_cnt=0, lgbm_cnt=0,
+    crm_realtime_cnt=0, crm_feedback_cnt=0, fc_cnt=0,
+    future_quality_score=0,
+):
+    try:
+        dm_actual = bool(dm_data)
+        dm_r = float((dm_data or {}).get("risk_tolerance", 0))
+        dm_s = float((dm_data or {}).get("structural_intelligence", 0))
+        dm_e = float((dm_data or {}).get("execution_consistency", 0))
+        # domains: 各機能利用回数を正規化して0-100に収める
+        _p = min(purpose_cnt, 20)   # purpose_mode_learningは20回で頭打ち
+        _c = min(chat_cnt, 600)     # chatは600回で頭打ち
+        d_analysis      = min(diag_cnt * 10 + file_diag_cnt * 12 + graph_cnt * 8 + table_cnt * 8, 100)
+        d_contradiction = min(int(dm_s * 0.6) + _p * 2 + fc_cnt * 20, 100)
+        _future_usage_score = min(future_cnt * 2, 20)
+        d_future = min(int(future_quality_score * 0.7 + _future_usage_score * 0.3), 100)
+        if future_quality_score < 35: d_future = min(d_future, 40)
+        d_execution     = min(int(dm_e * 0.6) + crm_feedback_cnt * 10 + inquiry_cnt * 8, 100)
+        d_continue      = min(int(_c / 600 * 70) + rag_cnt * 4 + cust_cnt * 6 + profile_cnt * 8, 100)
+        d_risk          = min(int(dm_r * 0.6) + crm_realtime_cnt * 10 + fc_cnt * 15 + investment_cnt * 8, 100)
+        d_structure     = min(cust_cnt * 10 + profile_cnt * 12 + lgbm_cnt * 15 + _p * 2 + rag_cnt * 4, 100)
+        overall = min(int(
+            d_continue * 0.15 + d_analysis * 0.2 + d_future * 0.1 +
+            d_structure * 0.15 + d_risk * 0.15 + d_execution * 0.1 + d_contradiction * 0.15
+        ), 100)
+        level = 1 if overall < 20 else 2 if overall < 40 else 3 if overall < 60 else 4 if overall < 80 else 5
+        level_label = ["起動段階","利用定着段階","構造認識段階","矛盾検知段階","自走設計段階"][level-1]
+        if d_continue >= 90 and d_future >= 70:
+            structure_type = "継続・未来主導型構造"; structure_desc = "継続力と未来設計力が強く、安定した実行構造。"
+        elif d_continue >= 80:
+            structure_type = "継続主導型構造"; structure_desc = "対話継続力が非常に高く、安定した実行構造。"
+        elif d_future >= 75:
+            structure_type = "未来偏重型構造"; structure_desc = "未来設計力が強い一方、現状の構造化が不足。"
+        elif d_execution >= 75:
+            structure_type = "実行加速型構造"; structure_desc = "実行力が高く、課題を迅速に処理する構造。"
+        elif d_contradiction >= 70:
+            structure_type = "矛盾観測型構造"; structure_desc = "矛盾検知力が発達し、問題の本質を捉える型。"
+        elif d_analysis <= 30 and diag_cnt < 3:
+            structure_type = "分析停滞型構造"; structure_desc = "分析・診断の活用が低く、構造化の余地が大きい型。"
+        else:
+            structure_type = "標準構造"; structure_desc = "標準的な利用構造。各ドメインをバランス良く活用中。"
+        feature_counts = {
+            "chat": chat_cnt,
+            "diagnosis": diag_cnt,
+            "decision_metrics": 1 if dm_actual else 0,
+            "rag": rag_cnt,
+            "file_diagnosis": file_diag_cnt,
+            "fixed_concept_report": fc_cnt,
+            "crm": cust_cnt,
+            "crm_realtime_inference": crm_realtime_cnt,
+            "crm_feedback_learning": crm_feedback_cnt,
+            "profile_generate": profile_cnt,
+            "future_simulation": future_cnt,
+            "presentation": presentation_cnt,
+            "image_generation": image_cnt,
+            "investment_signal": investment_cnt,
+            "personal_inquiry": inquiry_cnt,
+            "table_command": table_cnt,
+            "graph": graph_cnt,
+            "purpose_mode_learning": purpose_cnt,
+            "lgbm_training": lgbm_cnt,
+        }
+        return {
+            "version": 2,
+            "source": "backend",
+            "overall": overall,
+            "level": level,
+            "level_label": level_label,
+            "structure_type": structure_type,
+            "structure_desc": structure_desc,
+            "domains": {
+                "analysis": d_analysis,
+                "contradiction": d_contradiction,
+                "future": d_future,
+                "future_quality_score": future_quality_score,
+                "execution": d_execution,
+                "continue": d_continue,
+                "risk": d_risk,
+                "structure": d_structure,
+            },
+            "trend": [
+                {"label": "-30d", "value": max(0, overall - 18)},
+                {"label": "-7d",  "value": max(0, overall - 8)},
+                {"label": "NOW",  "value": overall},
+            ],
+            "feature_counts": feature_counts,
+            "connected_features": [f for f, v in feature_counts.items() if v > 0],
+            "missing_features":   [f for f, v in feature_counts.items() if v == 0],
+            "quality_scores": _build_quality_scores(
+                rag_cnt, crm_feedback_cnt, crm_realtime_cnt, cust_cnt,
+                chat_cnt, diag_cnt, purpose_cnt, presentation_cnt, investment_cnt,
+                graph_cnt, table_cnt
+            ),
+            "success_scores": _build_success_scores(
+                crm_feedback_cnt, cust_cnt, dm_data, diag_cnt, purpose_cnt
+            ),
+            "adoption_scores": _build_adoption_scores(
+                rag_cnt, cust_cnt, future_cnt, diag_cnt, lgbm_cnt
+            ),
+            "intelligence_scores": _build_intelligence_scores(
+                dm_data, diag_cnt, rag_cnt, graph_cnt, table_cnt,
+                future_cnt, investment_cnt, crm_feedback_cnt, purpose_cnt,
+                future_quality_score=future_quality_score,
+            ),
+            "system_intelligence": _build_system_intelligence(
+                overall=overall,
+                quality_scores=_build_quality_scores(
+                    rag_cnt, crm_feedback_cnt, crm_realtime_cnt, cust_cnt,
+                    chat_cnt, diag_cnt, purpose_cnt, presentation_cnt, investment_cnt,
+                    graph_cnt, table_cnt
+                ),
+                success_scores=_build_success_scores(
+                    crm_feedback_cnt, cust_cnt, dm_data, diag_cnt, purpose_cnt
+                ),
+                adoption_scores=_build_adoption_scores(
+                    rag_cnt, cust_cnt, future_cnt, diag_cnt, lgbm_cnt
+                ),
+                intelligence_scores=_build_intelligence_scores(
+                    dm_data, diag_cnt, rag_cnt, graph_cnt, table_cnt,
+                    future_cnt, investment_cnt, crm_feedback_cnt, purpose_cnt,
+                    future_quality_score=future_quality_score,
+                ),
+            ),
+        }
+    except Exception:
+        return {}
 
 @router.get("/stats")
 def get_user_stats(payload: dict = Depends(verify_token)):
@@ -171,6 +485,70 @@ def get_user_stats(payload: dict = Depends(verify_token)):
     last_diag_checkpoint = max(diag_hist_checkpoints) if diag_hist_checkpoints else 0
     diag_available = (diag_checkpoint >= diag_window) and (diag_checkpoint > last_diag_checkpoint)
     diag_next_unlock = diag_checkpoint + diag_window
+    # 各機能利用カウント集計
+    _ma_profile_cnt  = int(d.get("profile_gen_count", 0))
+    _ma_cust_cnt     = int(d.get("customer_ai_count", 0))
+    _ma_file_cnt     = int(d.get("file_diag_count", 0))
+    _ma_future_cnt   = int(d.get("future_sim_count", 0))
+    _ma_future_quality = _calc_future_quality(uid, db)
+    _ma_fc_score     = d.get("fixed_concept_score", None)
+    _ma_rag_cnt = 0
+    try:
+        _rag_logs = [l for l in logs if (l.to_dict() or {}).get("purpose_mode","") == "rag"]
+        _ma_rag_cnt = len(_rag_logs)
+    except Exception:
+        pass
+    _ma_presentation_cnt = 0
+    try:
+        _ps_snaps = list(db.collection("users").document(uid).collection("presentation_history").limit(200).stream())
+        _ma_presentation_cnt = len(_ps_snaps)
+    except Exception:
+        pass
+    _ma_image_cnt = 0
+    try:
+        _img_logs = [l for l in logs if (l.to_dict() or {}).get("purpose_mode","") in ["image","image_generation"]]
+        _ma_image_cnt = len(_img_logs)
+    except Exception:
+        pass
+    _ma_investment_cnt = 0
+    try:
+        _inv_snaps = list(db.collection("usage_logs").where("user_id","==",uid).where("purpose_mode","==","investment").limit(200).stream())
+        _ma_investment_cnt = len([s for s in _inv_snaps if not (s.to_dict() or {}).get("is_admin_test")])
+    except Exception:
+        pass
+    _ma_inquiry_cnt = 0
+    try:
+        _inq_snaps = list(db.collection("consulting_inquiries").where("uid","==",uid).limit(200).stream())
+        _ma_inquiry_cnt = len(_inq_snaps)
+    except Exception:
+        pass
+    _ma_table_cnt = 0
+    try:
+        _tbl_logs = [l for l in logs if (l.to_dict() or {}).get("purpose_mode","") in ["table","numeric"]]
+        _ma_table_cnt = len(_tbl_logs)
+    except Exception:
+        pass
+    _ma_graph_cnt = 0
+    try:
+        _grp_logs = [l for l in logs if (l.to_dict() or {}).get("purpose_mode","") in ["graph","analysis"]]
+        _ma_graph_cnt = len(_grp_logs)
+    except Exception:
+        pass
+    _ma_purpose_cnt = 0
+    try:
+        _pur_logs = [l for l in logs if (l.to_dict() or {}).get("purpose_mode","") not in ["","auto",None]]
+        _ma_purpose_cnt = len(_pur_logs)
+    except Exception:
+        pass
+    _ma_lgbm_cnt = 0
+    try:
+        _lgbm_snaps = list(db.collection("lgbm_training_logs").where("uid","==",uid).limit(200).stream())
+        _ma_lgbm_cnt = len(_lgbm_snaps)
+    except Exception:
+        pass
+    _ma_crm_realtime_cnt = int(d.get("crm_realtime_count", 0))
+    _ma_crm_feedback_cnt = int(d.get("crm_feedback_count", 0))
+    _ma_fc_cnt = 1 if _ma_fc_score is not None else 0
     return {
         "uid": uid,
         "level_score": level_score,
@@ -196,6 +574,30 @@ def get_user_stats(payload: dict = Depends(verify_token)):
         "level_last_delta": int(d.get("level_last_delta", 0)),
         "expires_at": str(d.get("expires_at", "")),
         "tenant_id": tenant_id,
+        "notification_settings": d.get("notification_settings", {}),
+        "maturity_analysis": _build_maturity(
+            chat_cnt=total_chat_count,
+            diag_cnt=diag_count,
+            dm_data=dm,
+            fc_score=_ma_fc_score,
+            profile_cnt=_ma_profile_cnt,
+            cust_cnt=_ma_cust_cnt,
+            file_diag_cnt=_ma_file_cnt,
+            future_cnt=_ma_future_cnt,
+            future_quality_score=_ma_future_quality,
+            rag_cnt=_ma_rag_cnt,
+            presentation_cnt=_ma_presentation_cnt,
+            image_cnt=_ma_image_cnt,
+            investment_cnt=_ma_investment_cnt,
+            inquiry_cnt=_ma_inquiry_cnt,
+            table_cnt=_ma_table_cnt,
+            graph_cnt=_ma_graph_cnt,
+            purpose_cnt=_ma_purpose_cnt,
+            lgbm_cnt=_ma_lgbm_cnt,
+            crm_realtime_cnt=_ma_crm_realtime_cnt,
+            crm_feedback_cnt=_ma_crm_feedback_cnt,
+            fc_cnt=_ma_fc_cnt,
+        ),
     }
 
 @router.get("/usage_logs")
@@ -212,6 +614,8 @@ def get_usage_logs(payload: dict = Depends(verify_token)):
             logs.append({
                 "prompt": str(data.get("prompt", ""))[:100],
                 "timestamp": str(data.get("timestamp", "")),
+                "purpose_mode": str(data.get("purpose_mode", "")),
+                "diagnosis_type": str(data.get("diagnosis_type", "")),
             })
         def _to_jst(t):
             from datetime import datetime, timedelta
@@ -667,6 +1071,7 @@ ALL_PURPOSE_MODES = {
     "hr":          "HR（人材/組織）",
     "ops":         "OPS（業務改善/効率化）",
     "tech":        "TECH（技術/エンジニア）",
+    "ascend":      "ASCEND（機能・使い方）",
 }
 
 def _load_rank_config(tenant_id: str) -> dict:
@@ -825,6 +1230,18 @@ def get_user_stats(payload: dict = Depends(verify_token)):
         "level_last_delta": int(d.get("level_last_delta", 0)),
         "expires_at": str(d.get("expires_at", "")),
         "tenant_id": tenant_id,
+        "notification_settings": d.get("notification_settings", {}),
+        "maturity_analysis": _build_maturity(
+            chat_cnt=total_chat_count,
+            diag_cnt=diag_count,
+            dm_data=dm,
+            fc_score=d.get("fixed_concept_score", None),
+            profile_cnt=int(d.get("profile_gen_count", 0)),
+            cust_cnt=int(d.get("customer_ai_count", 0)),
+            file_diag_cnt=int(d.get("file_diag_count", 0)),
+            future_cnt=int(d.get("future_sim_count", 0)),
+            future_quality_score=_calc_future_quality(uid, db),
+        ),
     }
 
 @router.get("/usage_logs")
@@ -841,6 +1258,8 @@ def get_usage_logs(payload: dict = Depends(verify_token)):
             logs.append({
                 "prompt": str(data.get("prompt", ""))[:100],
                 "timestamp": str(data.get("timestamp", "")),
+                "purpose_mode": str(data.get("purpose_mode", "")),
+                "diagnosis_type": str(data.get("diagnosis_type", "")),
             })
         def _to_jst(t):
             from datetime import datetime, timedelta
@@ -1268,9 +1687,9 @@ def get_purpose_modes(payload: dict = Depends(verify_token)):
     # プラン別モード制御
     STANDARD_MODES = ["auto", "numeric", "growth", "control", "analysis", "planning", "risk"]
     if plan == "starter":
-        keys = ["auto"]
+        keys = ["auto", "ascend"]
     elif plan == "standard":
-        keys = STANDARD_MODES
+        keys = STANDARD_MODES + ["ascend"]
     else:
         # pro/apex/ultra_admin/ultra_member → 全モード
         keys = list(ALL_PURPOSE_MODES.keys())
@@ -2042,6 +2461,9 @@ def generate_slides(body: dict = Body(...), payload: dict = Depends(verify_token
     uid = payload.get("uid", "")
     if not uid:
         raise HTTPException(status_code=401, detail="uid必須")
+    from api.core.features import is_feature_enabled
+    if not is_feature_enabled(uid, "diag_presentation"):
+        raise HTTPException(status_code=403, detail="プレゼン資料機能は現在未開放のため使用できません。")
 
     import json as _json
     from api.core.llm_client import call_llm
@@ -2339,6 +2761,9 @@ def generate_slides_stage1(body: dict = Body(...), payload: dict = Depends(verif
     uid = payload.get("uid", "")
     if not uid:
         raise HTTPException(status_code=401, detail="uid必須")
+    from api.core.features import is_feature_enabled
+    if not is_feature_enabled(uid, "diag_presentation"):
+        raise HTTPException(status_code=403, detail="プレゼン資料機能は現在未開放のため使用できません。")
     import json as _json
     from api.core.llm_client import call_llm
     decision_goal = str(body.get("decision_goal","")).strip()
@@ -2461,6 +2886,63 @@ def event_plan_history_delete(doc_id: str, payload: dict = Depends(verify_token)
     db = get_db()
     try:
         db.document(f"users/{uid}/event_plan_history/{doc_id}").delete()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.get("/notifications")
+def get_notifications(payload: dict = Depends(verify_token)):
+    uid = payload["uid"]
+    db = get_db()
+    try:
+        docs = list(db.collection("notifications").document(uid).collection("items")
+                    .stream())
+        items = []
+        for d in docs:
+            row = d.to_dict() or {}
+            items.append(row)
+        items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return {"notifications": items[:50]}
+    except Exception as e:
+        return {"notifications": [], "error": str(e)}
+
+@router.patch("/notifications/{notif_id}/read")
+def mark_notification_read(notif_id: str, payload: dict = Depends(verify_token)):
+    uid = payload["uid"]
+    db = get_db()
+    try:
+        db.collection("notifications").document(uid).collection("items").document(notif_id).set(
+            {"read": True}, merge=True)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.patch("/notifications/read_all")
+def mark_all_notifications_read(payload: dict = Depends(verify_token)):
+    uid = payload["uid"]
+    db = get_db()
+    try:
+        docs = list(db.collection("notifications").document(uid).collection("items")
+                    .where("read", "==", False).stream())
+        for d in docs:
+            d.reference.set({"read": True}, merge=True)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@router.post("/notification_settings")
+def save_notification_settings(payload: dict = Depends(verify_token), body: dict = Depends(lambda: None)):
+    uid = payload["uid"]
+    return {"ok": True}
+
+@router.post("/notification_settings_save")
+async def save_notification_settings_real(request: Request, payload: dict = Depends(verify_token)):
+    uid = payload["uid"]
+    db = get_db()
+    try:
+        body = await request.json()
+        db.collection("users").document(uid).set(
+            {"notification_settings": body}, merge=True)
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}

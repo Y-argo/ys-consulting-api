@@ -10,6 +10,39 @@ from api.core.firestore_client import get_db, DEFAULT_TENANT
 
 router = APIRouter(prefix="/api/inquiry", tags=["inquiry"])
 
+def _write_notification(uid: str, notif_type: str, title: str, body: str, link_tab: str = "overview"):
+    """Firestoreに通知レコードを書き込む共通関数"""
+    try:
+        import uuid as _uuid
+        import datetime as _dt
+        db = get_db()
+        snap = db.collection("users").document(uid).get()
+        d = snap.to_dict() if snap.exists else {}
+        settings = d.get("notification_settings", {})
+        type_key_map = {
+            "reply": "notify_reply",
+            "rankup": "notify_rankup",
+            "fc": "notify_fc",
+            "inquiry": "notify_inquiry",
+            "priority_action": "notify_reply",
+        }
+        setting_key = type_key_map.get(notif_type, "notify_reply")
+        if settings.get(setting_key, True) is False:
+            return
+        notif_id = _uuid.uuid4().hex
+        db.collection("notifications").document(uid).collection("items").document(notif_id).set({
+            "notif_id": notif_id,
+            "uid": uid,
+            "type": notif_type,
+            "title": title,
+            "body": body,
+            "link_tab": link_tab,
+            "read": False,
+            "created_at": (_dt.datetime.utcnow() + _dt.timedelta(hours=9)).isoformat(),
+        })
+    except Exception as e:
+        print(f"[NOTIFICATION_ERROR] {e}", flush=True)
+
 COL_INQUIRIES = "consulting_inquiries"
 COL_INQ_MESSAGES = "consulting_inquiry_messages"
 
@@ -28,8 +61,11 @@ class AddMessageRequest(BaseModel):
 
 @router.get("/list")
 def list_inquiries(payload: dict = Depends(verify_token)):
+    from api.core.features import is_feature_enabled
     uid = payload["uid"]
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+    if not is_feature_enabled(uid, "personal_consulting"):
+        raise HTTPException(status_code=403, detail="個人相談は現在未開放のため使用できません。")
     db = get_db()
     try:
         docs = list(
@@ -89,8 +125,11 @@ def get_messages(inquiry_id: str, payload: dict = Depends(verify_token)):
 
 @router.post("/create")
 def create_inquiry(req: CreateInquiryRequest, payload: dict = Depends(verify_token)):
+    from api.core.features import is_feature_enabled
     uid = payload["uid"]
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+    if not is_feature_enabled(uid, "personal_consulting"):
+        raise HTTPException(status_code=403, detail="個人相談は現在未開放のため使用できません。")
     db = get_db()
     inquiry_id = str(uuid.uuid4())
     now = datetime.datetime.utcnow()
@@ -133,8 +172,11 @@ def create_inquiry(req: CreateInquiryRequest, payload: dict = Depends(verify_tok
 
 @router.post("/message")
 def add_message(req: AddMessageRequest, payload: dict = Depends(verify_token)):
+    from api.core.features import is_feature_enabled
     uid = payload["uid"]
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
+    if not is_feature_enabled(uid, "personal_consulting"):
+        raise HTTPException(status_code=403, detail="個人相談は現在未開放のため使用できません。")
     db = get_db()
     inq = db.collection(COL_INQUIRIES).document(req.inquiry_id).get()
     if not inq.exists or (inq.to_dict() or {}).get("user_id") != uid:
@@ -271,4 +313,18 @@ def admin_reply(req: AdminReplyRequest, payload: dict = Depends(verify_token)):
         "unread_for_admin": False,
         "status": "replied",
     })
+    # 個人相談返信通知→ユーザーに通知
+    try:
+        inq_d = inq.to_dict() or {}
+        target_uid = inq_d.get("user_id", "")
+        if target_uid:
+            _write_notification(
+                uid=target_uid,
+                notif_type="inquiry",
+                title="📩 個人相談に返信が届きました",
+                body=req.body.strip()[:60] + "..." if len(req.body.strip()) > 60 else req.body.strip(),
+                link_tab="dm",
+            )
+    except Exception:
+        pass
     return {"message_id": message_id, "ok": True}

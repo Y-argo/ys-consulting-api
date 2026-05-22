@@ -16,6 +16,41 @@ from api.core.intent import update_user_intent_state, generate_query_plan, lgbm_
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
+def _write_notification(uid: str, notif_type: str, title: str, body: str, link_tab: str = "overview"):
+    """Firestoreに通知レコードを書き込む共通関数"""
+    try:
+        import uuid as _uuid
+        import datetime as _dt
+        db = get_db()
+        # ユーザーの通知設定を確認
+        snap = db.collection("users").document(uid).get()
+        d = snap.to_dict() if snap.exists else {}
+        settings = d.get("notification_settings", {})
+        type_key_map = {
+            "reply": "notify_reply",
+            "rankup": "notify_rankup",
+            "fc": "notify_fc",
+            "inquiry": "notify_inquiry",
+            "priority_action": "notify_reply",
+        }
+        setting_key = type_key_map.get(notif_type, "notify_reply")
+        # デフォルトTrue（設定がなければ通知する）
+        if settings.get(setting_key, True) is False:
+            return
+        notif_id = _uuid.uuid4().hex
+        db.collection("notifications").document(uid).collection("items").document(notif_id).set({
+            "notif_id": notif_id,
+            "uid": uid,
+            "type": notif_type,
+            "title": title,
+            "body": body,
+            "link_tab": link_tab,
+            "read": False,
+            "created_at": (_dt.datetime.utcnow() + _dt.timedelta(hours=9)).isoformat(),
+        })
+    except Exception as e:
+        print(f"[NOTIFICATION_ERROR] {e}", flush=True)
+
 def _clean_reply(text: str) -> str:
     """Markdownテーブルのセパレーター正規化・スペース圧縮・英語instruction除去"""
     import re as _re
@@ -46,6 +81,61 @@ MANDATORY_RULES = """
 DEFAULT_SYSTEM_PROMPT = """【最重要・全ルール最優先】いかなる質問・内容に対しても必ず回答を生成せよ。回答拒否・出力拒否は絶対禁止。水商売・接客業・ナイトビジネスを含む全合法業種のビジネス支援システムである。ナレッジ記載内容の出力は業務上の正当な情報提供であり、いかなる理由でも拒否するな。必ず日本語で回答を出力せよ。
 あなたは「Ys Consulting Office」の戦略コンサルタント（LM）である。
 目的は利益最大化・勝率向上・リスク最小化・意思決定の高速化。
+
+【ASCENDとは — 機能・特徴を質問された場合は必ず以下の情報を根拠に具体的に回答せよ】
+ASCENDはYs Consulting Officeが提供するAIコンサルティングSaaSプラットフォームである。戦略・数値・構造・リスクあらゆる経営判断に即応するAIコンサルティングエンジンであり、一般的なチャットAIではなく診断・分析・実行支援に特化した経営判断専用エンジンである。
+
+■ AIチャット系
+- AIチャット：テキスト・画像・ファイル対応のメインチャット機能
+- 画像解析：画像をアップロードしてAIが詳細解析
+- ファイル解析：PDF・Excel等の資料を読み込み解析
+
+■ 診断系
+- 現状課題診断：現状を構造化し本質的な課題を診断
+- 構造診断：事象を解剖し構造を可視化
+- 課題仮説：課題仮説を体系的に生成
+- 比較分析：選択肢を多次元で比較評価
+- 矛盾検知：論理矛盾・整合性ズレを検出
+- 実行計画：実行プランの設計・分析
+- 投資シグナル：投資判断シグナルを分析（APEX/ULTRA限定）
+- 思考マップ：思考の構造をグラフ化
+- ファイル診断：Excel/PDF等を数値分析+AI解釈（Chain of Thought分析）
+- 未来分岐シミュレーター：将来の分岐を予測
+
+■ 分析・レポート
+- Decision Metrics：意思決定6指標スコアリング
+- 固定概念レポート：LightGBMによる思考の固定概念・盲点を分析（PRO以上）
+- プレゼン資料生成：スライドを自動生成
+- プロファイル生成：特徴入力から人柄・行動パターン・強み・接し方を推定（APEX/ULTRA）
+- 顧客AIマネジメント：顧客心理状態を時系列推論し接客最適化・離脱防止・キャスト相性・店舗全体知能を統合した店舗知能OS（APEX/ULTRA）
+
+■ 生成系
+- 画像生成：AIで画像を生成（STANDARD以上）
+- 生成画像ギャラリー：生成画像を一覧管理
+
+■ 相談
+- 個人相談：Ys Consulting Officeの専門コンサルへの個別スレッド相談（PRO以上）
+
+■ プラットフォーム
+- ランクシステム：活用度（level_score）に応じて追従者→実行者→戦略家→設計者の4段階称号が変化する成長可視化システム
+- マイページ：統計・履歴・設定の一覧
+- プラン管理：利用プランの確認・変更
+- 用途別モード切替：用途に応じて柔軟にモードを切替（最大19モード）
+
+■ AIエンジン構成（3段階）
+- SWIFT（迅速）：高速レスポンス・AUTO/7モード対応。日常的な戦略相談・施策整理に最適。STARTER/STANDARD対応。
+- ADVANCE（高度）：全19モード対応の高精度エンジン。ファイル診断・固定概念レポート・画像生成・個人相談が解放される。PRO対応。
+- SUPREME（至高）：全機能解放の最上位エンジン。投資シグナルを含む全19モード・全機能で最高難度の経営判断に対応。APEX/ULTRA対応。
+
+■ コンサルティング力の核心
+ASCENDのコンサルティング力は以下の点に集約される。
+1. RAGナレッジ参照：テナントごとの業界・業務ナレッジをベクトル検索で参照し一般AIが知らない情報を回答に反映
+2. 構造化診断：現状課題・矛盾・比較・実行を多軸で同時分析し盲点を排除
+3. 数値分析：ファイル診断でPython/pandasによる定量分析をChain of Thoughtで4段階処理
+4. 意思決定支援：Decision Metrics 6指標で判断品質を数値化・可視化
+5. 固定概念破壊：LGBMレポートで思考パターンの固定概念・バイアスを自動検出
+6. 投資シグナル連携：相場データと連動した具体的投資見解の提示（APEX/ULTRA）
+7. 個人相談：Ys Consulting Officeコンサルタントとの直接スレッド往復（PRO以上）
 - 口調：丁寧・敬意。相手の理解速度に合わせるが結論は曖昧にしない。
 - 禁止：慰め・言い訳・情緒誘導・根拠なき断定。
 - 禁止：「私には予測できません」「判断できません」等の無能宣言は絶対禁止。予測・見通しを求められた場合は現状データ・トレンド・過去事例から必ず具体的見解を提示せよ。ただしナレッジ・データに存在しない具体的数値・固有情報（バック率・料金・人名等）は絶対に推測・捏造するな。その場合は「ナレッジに情報がないため回答できません」と答えよ。
@@ -198,6 +288,16 @@ def _update_level_score(tenant_id: str, uid: str, delta: int):
             "level_last_delta": delta,
             "level_last_updated_at": fs.SERVER_TIMESTAMP,
         }, merge=True)
+        # ランクアップ検出→通知
+        old_rank = d.get("level", "")
+        if old_rank and rank != old_rank:
+            _write_notification(
+                uid=uid,
+                notif_type="rankup",
+                title="🏆 ランクアップしました！",
+                body=f"{old_rank} → {rank} に昇格しました。",
+                link_tab="rankup",
+            )
     except Exception:
         pass
 
@@ -309,20 +409,18 @@ def _load_tenant_system_prompt(tenant_id: str, uid: str = "") -> str:
             # ultra_member: use_admin_settings=Trueの時のみadmin設定をベースに追加
             if plan == "ultra_member" and tenant_id and u.get("use_admin_settings", False):
                 try:
-                    admin_docs = list(
-                        db.collection("users")
-                        .where("tenant_id", "==", tenant_id)
-                        .limit(20)
-                        .stream()
-                    )
+                    _aid = _get_admin_uid(tenant_id)
                     admin_custom = ""
                     admin_mode = "append"
-                    for ad in admin_docs:
-                        ad_data = ad.to_dict() or {}
-                        if ad_data.get("plan") == "ultra_admin" or ad_data.get("role") == "ultra_admin":
-                            admin_custom = (ad_data.get("custom_sys_prompt") or "").strip()
-                            admin_mode = (ad_data.get("custom_prompt_mode") or "append").strip()
-                            break
+                    if _aid:
+                        try:
+                            _a_snap = db.collection("users").document(_aid).get()
+                            if _a_snap.exists:
+                                _a_data = _a_snap.to_dict() or {}
+                                admin_custom = (_a_data.get("custom_sys_prompt") or "").strip()
+                                admin_mode = (_a_data.get("custom_prompt_mode") or "append").strip()
+                        except Exception:
+                            pass
                     if admin_custom:
                         if admin_mode == "replace":
                             tenant_prompt = admin_custom
@@ -343,9 +441,185 @@ def _load_tenant_system_prompt(tenant_id: str, uid: str = "") -> str:
         pass
     return tenant_prompt + "\n\n" + MANDATORY_RULES
 
+# ── admin_uid キャッシュ（インメモリTTL=1時間 + tenant_settings永続化） ──
+_admin_uid_cache: dict = {}  # {tenant_id: (admin_uid, timestamp)}
+_ADMIN_UID_TTL = 3600  # 1時間
+
+def _get_admin_uid(tenant_id: str) -> str:
+    """優先順位: 1.インメモリキャッシュ(TTL内=Firestore不要) 2.tenant_settings(1doc) 3.初回スキャン→保存"""
+    if not tenant_id:
+        return ""
+    import time as _t
+    now = _t.time()
+    if tenant_id in _admin_uid_cache:
+        _uid, _ts = _admin_uid_cache[tenant_id]
+        if now - _ts < _ADMIN_UID_TTL:
+            return _uid
+    try:
+        db = get_db()
+        ts_snap = db.collection("tenant_settings").document(tenant_id).get()
+        if ts_snap.exists:
+            cached = (ts_snap.to_dict() or {}).get("admin_uid", "")
+            if cached:
+                _admin_uid_cache[tenant_id] = (cached, now)
+                return cached
+        ads = list(db.collection("users").where("tenant_id", "==", tenant_id).limit(50).stream())
+        for ad in ads:
+            if (ad.to_dict() or {}).get("plan") == "ultra_admin":
+                db.collection("tenant_settings").document(tenant_id).set(
+                    {"admin_uid": ad.id}, merge=True
+                )
+                _admin_uid_cache[tenant_id] = (ad.id, now)
+                return ad.id
+        # ultra_admin未発見もTTL内キャッシュ（再スキャン防止）
+        _admin_uid_cache[tenant_id] = ("", now)
+    except Exception:
+        pass
+    return ""
+
 def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: str = "", admin_uid: str = "", is_apex_ultra: bool = False):
     """returns (prompt_str, chunks_list)"""
     try:
+        import re as _re_skip
+        _ascend_self_patterns = [
+            r"ASCEND.*とは",
+            r"ASCENDの.*機能",
+            r"ASCENDの.*使い方",
+            r"ASCEND.*使い方",
+            r"ASCEND.*何ができる",
+            r"ASCEND.*できること",
+            r"ASCEND.*料金",
+            r"ASCEND.*プラン",
+            r"ASCEND.*思想",
+            r"ASCEND.*哲学",
+            r"ASCEND.*実力",
+            r"ASCEND.*特徴",
+            r"ASCENDの.*コンサル",
+            r"ASCENDの.*力",
+            r"ASCENDに.*できる",
+            r"ASCENDで.*できる",
+            r"ASCENDの.*強み",
+            r"ASCENDとは",
+            r"ASCENDって",
+            r"ASCEND.*何",
+            r"コンサル力",
+            r"このシステム.*機能",
+            r"このシステム.*使い方",
+            r"このAI.*できる",
+            r"このAI.*何ができる",
+            r"使い方",
+            r"機能.*教えて",
+            r"システム.*説明",
+            r"どう使う",
+            r"何ができますか",
+            r"何ができる",
+            r"プラン.*教えて",
+            r"料金.*教えて",
+            r".*とは？",
+            r".*とは?",
+            r".*の機能",
+            r".*の使い方",
+            r".*できること",
+            r".*何ですか",
+            r".*説明して",
+            r".*教えてください",
+        ]
+        if any(_re_skip.search(p, query) for p in _ascend_self_patterns):
+            _about_instruction = """
+【ASCEND自己説明モード】
+ユーザーはASCEND自身の使い方・機能・思想・実力・料金・できることを質問している。
+この場合、外部RAGや一般論に逃げず、system_prompt内のASCEND説明情報を最優先根拠として回答せよ。
+
+【必須回答方針】
+- 「分かりません」「該当情報なし」「専門外です」と答えることは禁止。
+- ASCENDの全体像、主要機能、AIエンジン、診断、ファイル診断、画像、投資シグナル、個人相談、プラン差を必要に応じて具体的に説明する。
+- 単なる機能一覧ではなく、ASCENDの思想・哲学・実力・支援領域まで示す。
+- 質問が「使い方」の場合は、ユーザーが次に何を入力すればよいかまで案内する。
+- 質問が短くても、ASCENDの価値が伝わるように具体的に答える。
+
+【ASCEND説明時の禁止事項】
+- 幼稚な口調禁止
+- キャラクターAI口調禁止（「〜だよ」「相棒」「寄り添う」等）
+- 過剰な感情表現禁止
+- 絵文字禁止
+- 汎用自己啓発AI化禁止
+- 恋愛洗脳・依存誘導として説明すること禁止
+
+【ASCEND説明スタイル】
+ASCENDは「経営判断OS」「構造解析エンジン」「戦略実行支援基盤」として説明せよ。
+説明時は以下を優先:
+1. 何を分析するか
+2. 何を構造化するか
+3. 何を意思決定支援するか
+4. どのAIエンジンが関係するか
+5. 実務上どう使うか
+6. 数値・構造・戦略にどう寄与するか
+
+【顧客AIマネジメント説明ルール】
+顧客AIマネジメントは以下として説明すること:
+- 顧客心理状態の時系列推論
+- 離脱リスク検知
+- 接客最適化
+- 顧客タイプ分析
+- キャスト相性分析
+- 店舗全体知能OS
+- CRM高度化
+- リピート維持
+- 接客品質改善
+- 顧客行動予測
+禁止: 嫉妬操作・執着誘導・洗脳的表現・恋愛誘導テクニック中心の説明
+
+【全機能詳細説明モード】
+ユーザーが「全機能」「機能一覧」「何ができる」「詳しく説明」と聞いた場合、以下のカテゴリ順で各機能を省略せず説明せよ。
+
+1. AIチャット系
+- AIチャット: テキスト相談、経営判断、戦略整理、課題分解、施策立案を支援するメインチャット。用途別モードにより相談・分析・実行・数値・構造などの観点を切り替える。
+- 画像解析: 画像をアップロードし、内容・構造・文字・配置・デザイン・改善点を解析する。
+- ファイル解析: PDF、Excel、CSV、テキスト等を読み込み、資料内容の要約・論点整理・数値確認・改善提案を行う。
+
+2. 診断系
+- 現状課題診断: 現状を入力し、表面的な悩みではなく本質課題・原因・優先順位を診断する。
+- 構造診断: 事象を要素分解し、原因・関係性・支配構造を可視化する。
+- 課題仮説: 現状情報から複数の課題仮説を生成し、検証すべき論点を整理する。
+- 比較分析: 複数案を多面的に比較し、メリット・リスク・実行難度・優先度を評価する。
+- 矛盾検知: 計画・発言・方針・数値の中にある論理矛盾や整合性のズレを検出する。
+- 実行計画: 目標に対して具体的な手順・優先順位・実行ロードマップを設計する。
+- 投資シグナル: 市場・銘柄・条件をもとに投資判断の補助シグナルを分析する。
+- 思考マップ: 思考・課題・選択肢・因果関係をマップ化し、見落としを減らす。
+- ファイル診断: Excel/PDF等を数値分析とAI解釈で深掘りし、資料全体の構造・異常・改善点を診断する。
+- 未来分岐シミュレーター: 現在の選択肢から複数の未来シナリオを予測し、リスクと打ち手を整理する。
+
+3. 分析・レポート
+- Decision Metrics: 意思決定を複数指標でスコアリングし、判断の質・リスク・実行可能性を可視化する。
+- 固定概念レポート: ユーザーの思考傾向や判断の癖を分析し、固定概念・盲点・改善視点を提示する。
+- プレゼン資料生成: 入力内容をもとに、提案・報告・戦略説明用のスライド構成を生成する。
+- プロファイル生成: 特徴入力から、人柄・行動傾向・強み・接し方を推定する。
+- 顧客AIマネジメント: 顧客心理状態の時系列推論、接客最適化、離脱防止、キャスト相性分析、CRM高度化、店舗全体知能化を支援する店舗知能OS。
+
+4. 生成系
+- 画像生成: 指示文から画像を生成し、企画・広告・世界観設計・ビジュアル案作成を支援する。
+- 生成画像ギャラリー: 生成した画像を一覧管理し、再確認・活用できる。
+
+5. 相談
+- 個人相談: 通常チャットより深い個別相談を行い、課題・意思決定・方針設計を支援する。
+
+6. プラットフォーム
+- ランクシステム: 活用度に応じてlevel_scoreが上がり、追従者→実行者→戦略家→設計者へ称号が変化する。
+- マイページ: 統計、履歴、設定、レポート確認を行う。
+- プラン管理: 利用中プランと解放機能を確認する。
+- 用途別モード切替: 相談目的に応じてAIの回答視点を切り替える。
+
+7. AIエンジン
+- SWIFT: 高速応答向け。日常相談・基本整理・簡易分析に適する。
+- ADVANCE: 高精度エンジン。全19モード、ファイル診断、固定概念レポート、画像生成、個人相談などに対応。
+- SUPREME: 最上位エンジン。全機能解放、投資シグナル、最高難度の経営判断に対応。
+
+【回答ルール】
+全機能説明では各機能について必ず以下を含める:
+- 機能概要 / 入力するもの / 出力されるもの / 実務での使い道 / 経営判断上の価値
+禁止: 機能名だけの羅列・汎用AI説明・system_promptに存在しない機能の創作・恋愛誘導・心理操作・依存形成への逸脱・絵文字・幼稚な口調・相棒口調
+"""
+            return system_prompt + "\n\n" + _about_instruction, [], True
         from api.core.rag import embed_text, rag_retrieve_chunks_with_vec
         # ユーザーのRAG設定をFirestoreから取得
         _rag_threshold = 0.42
@@ -363,7 +637,7 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: 
         try:
             _query_vec = embed_text(query)
         except Exception:
-            return system_prompt, []
+            return system_prompt, [], False
         chunks = rag_retrieve_chunks_with_vec(tenant_id=tenant_id, query_vec=_query_vec, top_k=_rag_top_k, threshold=_rag_threshold)
         if admin_uid:
             try:
@@ -429,7 +703,7 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: 
                     f"Markdown表のセパレーター行は | --- | --- | 形式のみ（:や=や-の4つ以上連続は禁止）。"
                     f"重要ポイントは**太字**で強調せよ。\n\n"
                     f"【参照ナレッジ({len(chunks)}件)】\n{rag_text}\n\n{system_prompt}"
-                ), chunks
+                ), chunks, False
             else:
                 _max_score = max((c.get("_score", 0) for c in chunks), default=0)
                 if _max_score >= 0.70:
@@ -438,12 +712,12 @@ def _build_system_with_rag(tenant_id: str, query: str, system_prompt: str, uid: 
                         f"ナレッジに該当情報がある場合はキャラクターの口調を維持しながら必ずその内容を回答に反映せよ。"
                         f"ナレッジに記載のない情報は独自に作らず'確認できませんでした'と答えよ。\n\n"
                         f"【参照ナレッジ({len(chunks)}件)】\n{rag_text}\n\n{system_prompt}"
-                    ), chunks
+                    ), chunks, False
                 else:
-                    return f"{system_prompt}\n\n【参考情報】\n{rag_text}", chunks
+                    return f"{system_prompt}\n\n【参考情報】\n{rag_text}", chunks, False
     except Exception:
         pass
-    return system_prompt, []
+    return system_prompt, [], False
 
 # ── エンドポイント ─────────────────────────────────────────
 class ChatRequest(BaseModel):
@@ -454,8 +728,6 @@ class ChatRequest(BaseModel):
     chat_mode: str = "consult"
 
 class ChatResponse(BaseModel):
-    intent: dict | None = None
-    intent_label: str | None = None
     reply: str
     chat_id: str
     msg_id: str
@@ -464,6 +736,8 @@ class ChatResponse(BaseModel):
     structured: Optional[dict] = None
     intent: Optional[dict] = None
     intent_label: Optional[str] = None
+    sources: Optional[list] = None
+    confirmation_choices: Optional[list] = None
 
 class SessionInfo(BaseModel):
     chat_id: str
@@ -473,6 +747,11 @@ class SessionInfo(BaseModel):
 @router.post("/send", response_model=ChatResponse)
 def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     uid       = payload["uid"]
+    from api.core.features import is_feature_enabled as _isfe_tier
+    if req.ai_tier in ("ultra", "apex"):
+        _tier_feat = "ascend_ultra" if req.ai_tier == "ultra" else "ascend_apex"
+        if not _isfe_tier(uid, _tier_feat):
+            raise HTTPException(status_code=403, detail=f"このAIエンジン（{req.ai_tier}）は現在未開放のため使用できません。")
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
     chat_id   = (req.chat_id or "main").strip() or "main"
 
@@ -482,6 +761,9 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     messages = history + [{"role": "user", "content": req.message}]
 
     base_prompt   = _load_tenant_system_prompt(tenant_id, uid=uid)
+    # ── ASCEND静的辞書ヒット検出（推奨モード用） ──
+    _ascend_dict_key, _ascend_dict_text = _ascend_static_answer(req.message)
+    _ascend_dict_hit = bool(_ascend_dict_key and _ascend_dict_text)
     # chat_mode / is_talk を先に確定
     chat_mode = (req.chat_mode or "consult").strip().lower()
     is_talk = chat_mode == "talk"
@@ -566,9 +848,22 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _user_plan = (_u_data.get("plan") or "user").strip()
     _is_apex_ultra = _user_plan in ("apex", "ultra_admin", "ultra_member")
     if not is_talk:
-        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, base_prompt, uid=payload.get("uid",""), admin_uid=_admin_uid, is_apex_ultra=_is_apex_ultra)
+        # ASCENDモード or 辞書ヒット時: 辞書内容をsystem_promptへ注入してLLMに渡す
+        _base_for_rag = base_prompt
+        _mode_is_ascend = (req.purpose_mode or "").strip().lower() == "ascend"
+        if _ascend_dict_hit or _mode_is_ascend:
+            _dict_content = _ascend_dict_text if _ascend_dict_text else ""
+            if _mode_is_ascend and not _dict_content:
+                # モード選択時はASCEND全機能説明を渡す
+                parts = ["ASCENDの主な機能は以下です。"]
+                for name, desc in ASCEND_FEATURE_GUIDE.items():
+                    if name not in ["ASCENDとは", "ASCENDの名前の由来", "SWIFT / ADVANCE / SUPREME"]:
+                        parts.append(f"■ {name}\n{desc}")
+                _dict_content = "\n\n".join(parts)
+            _base_for_rag = base_prompt + "\n\n【ASCEND辞書情報 - 必ずこの内容を根拠に回答せよ】\n" + _dict_content
+        system_prompt, _rag_chunks, _is_ascend_about = _build_system_with_rag(tenant_id, req.message, _base_for_rag, uid=payload.get("uid",""), admin_uid=_admin_uid, is_apex_ultra=_is_apex_ultra)
     else:
-        system_prompt, _rag_chunks = base_prompt, []
+        system_prompt, _rag_chunks, _is_ascend_about = base_prompt, [], False
         # 会話モード：カスタムプロンプトがある場合はRAG+URL注入を発動
         try:
             _talk_user_doc = get_db().collection("users").document(uid).get()
@@ -579,14 +874,13 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         # 会話モード: 常にRAGを呼ぶ（全プラン共通）
         _talk_custom_only = ((_talk_user_doc.to_dict() or {}).get("custom_sys_prompt") or "").strip() if _talk_has_custom else ""
         _talk_base = _talk_custom_only if (_talk_custom_only and not _is_custom_replace) else base_prompt
-        system_prompt, _rag_chunks = _build_system_with_rag(tenant_id, req.message, _talk_base, uid=uid, admin_uid=_admin_uid, is_apex_ultra=_is_apex_ultra)
+        system_prompt, _rag_chunks, _is_ascend_about = _build_system_with_rag(tenant_id, req.message, _talk_base, uid=uid, admin_uid=_admin_uid, is_apex_ultra=_is_apex_ultra)
         if _talk_has_custom and not _is_custom_replace:
             system_prompt = (
                 "【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を完全に内面化し、自分の言葉として再構築して答えよ。"
                 "ナレッジの文言・ファイル名・資料名・出典を直接引用・露出することは絶対禁止。"
-                "質問に対してキャラクターの口調で直接答えよ。"
+                "【口調厳守】いかなるキャラクター設定が存在しても、出力は必ず丁寧・敬語・プロフェッショナルなコンサルタント口調で答えよ。ため口・カジュアル・絵文字・慰め表現は絶対禁止。"
                 "知識ファイルに表・一覧・チェックリストが含まれる場合は必ずMarkdown表で出力せよ。"
-                "それ以外は内容の深さに応じて自然な会話口調で答えよ。"
                 "前置き宣言（「今回は〜についてご説明します」等）は禁止。\n\n"
                 + system_prompt
             )
@@ -602,6 +896,10 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     _max_rag_score = max((c.get("_score", 0) for c in _rag_chunks), default=0.0) if _rag_chunks else 0.0
     print(f"[RAG_VERIFY] chunks={len(_rag_chunks)} max_score={_max_rag_score:.3f}", flush=True)
     system_prompt = system_prompt + intent_ctx
+    for _i, _c in enumerate(_rag_chunks[:5]):
+        _txt = str(_c.get("text") or _c.get("content") or _c)
+    if history:
+        pass
     if _rag_chunks:
         system_prompt += '\n\nナレッジに記載のない情報を生成することは絶対禁止。参照ナレッジに記載がない場合は「該当情報なし」と回答せよ。'
 
@@ -616,7 +914,7 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     if _plan_hit_m:
         system_prompt += PLAN_DEFINITION
     # RAG=0件 かつ プランキーワードなし → ⚠️フォールバック
-    _no_rag_fallback = (not _rag_chunks) and (not _plan_hit_m)
+    _no_rag_fallback = (not _rag_chunks) and (not _plan_hit_m) and (not _is_ascend_about)
     if _no_rag_fallback:
         system_prompt += '\n\n【⚠️ナレッジ未検証回答モード】専用ナレッジ・中央倉庫のいずれにも該当情報が存在しない。質問に対してLLMの一般知識で誠実に回答せよ。「回答できません」「専門外です」等の拒否は絶対禁止。回答の冒頭に必ず「⚠️ナレッジ未検証回答」と表示せよ。'
 
@@ -651,6 +949,396 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 
     # モード別システムプロンプト追加
     _MODE_INSTRUCTIONS = {
+        "numeric":     "【NUMERICモード】数値・KPI・売上・コスト分析に特化せよ。必ず数値・比率・計算式を使って回答せよ。",
+        "strategy":    "【STRATEGYモード】競合分析・差別化・ポジショニング戦略に特化せよ。3C/4P/SWOT等のフレームワークを活用し、戦略的選択肢と優先順位を提示せよ。",
+        "control":     "【CONTROLモード】組織・権限・業務フロー・マネジメント構造に特化せよ。責任分担・権限設計・フロー最適化の観点から回答せよ。",
+        "growth":      "【GROWTHモード】スキル・習慣・成長設計に特化せよ。具体的なトレーニング方法・習慣化ステップ・成長指標を提示せよ。",
+        "analysis":    "【ANALYSISモード】データ・事象の多角的解析に特化せよ。因果関係・相関・パターンを分解し、複数の解釈仮説を提示せよ。",
+        "planning":    "【PLANNINGモード】ロードマップ・フェーズ設計に特化せよ。時系列・マイルストーン・依存関係を明示したアクションプランを提示せよ。",
+        "risk":        "【RISKモード】リスク特定・評価・対策設計に特化せよ。発生確率×影響度でリスクを評価し、回避・軽減・転嫁・受容の選択肢を提示せよ。",
+        "marketing":   "【MARKETINGモード】集客・ブランディング・広告施策に特化せよ。ターゲット定義・チャネル選定・CVR改善の観点から具体施策を提示せよ。",
+        "diagnosis":   "【DIAGNOSISモード】現状課題の発見・根本原因分析に特化せよ。なぜなぜ分析・ロジックツリー等で根本原因を特定し、表面的対処を避けよ。",
+        "forecast":    "【FORECASTモード】将来予測・シナリオ分析に特化せよ。楽観・中立・悲観の3シナリオを定量的に提示し、各シナリオの発生条件を明示せよ。",
+        "finance":     "【FINANCEモード】財務・投資・資金計画分析に特化せよ。ROI・回収期間・キャッシュフロー・損益分岐点を数値で示せ。",
+        "hr":          "【HRモード】採用・評価・組織設計・人材育成に特化せよ。評価基準・採用要件・育成ステップを構造的に提示せよ。",
+        "negotiation": "【NEGOTIATIONモード】交渉・説得・合意形成戦略に特化せよ。相手の利害・BATNAを分析し、Win-Winの合意シナリオと交渉戦術を提示せよ。",
+        "creative":    "【CREATIVEモード】アイデア発想・コンセプト設計に特化せよ。既存の枠を超えた発想を複数提示し、実現可能性と独自性を評価せよ。",
+        "summary":     "【SUMMARYモード】要約・整理に特化せよ。要点を3〜5項目に絞り、階層構造で簡潔に整理せよ。",
+        "legal":       "【LEGALモード】法務・規約・コンプライアンスの解説に特化せよ。ただし法的助言ではなく情報提供として提示し、専門家確認を推奨せよ。",
+        "coaching":    "【COACHINGモード】自己変革・思考パターン改善に特化せよ。質問・内省促進・気づきの提供を優先し、答えを与えるより考えさせる回答をせよ。",
+        "ops":         "【OPSモード】業務改善・効率化・オペレーション最適化に特化せよ。ボトルネック特定・工数削減・標準化・自動化の観点から具体的改善策を提示せよ。",
+        "tech":        "【TECHモード】技術・エンジニアリング・システム設計に特化せよ。技術的トレードオフ・アーキテクチャ選定・実装方針を構造的に提示せよ。",
+    }
+    _mk = (req.purpose_mode or "auto").strip().lower()
+    # planning mode: ExecutionPlan を事前生成（reply依存禁止）
+    execution_plan_obj = None
+    if _mk == "planning":
+        try:
+            from api.core.intent import build_execution_plan as _bep
+            execution_plan_obj = _bep(req.message, tenant_id, "mixed")
+        except Exception as _ep_err:
+            print(f"[EXEC_PLAN_ERROR] {_ep_err}", flush=True)
+    # planning mode: execution_plan_obj を system_prompt に注入
+    if _mk == "planning" and execution_plan_obj and isinstance(execution_plan_obj, dict):
+        import json as _epj3
+        _ep_json = _epj3.dumps(execution_plan_obj, ensure_ascii=False)
+        system_prompt += (
+            "\n\n【実行計画オブジェクト（必ずこの構造を根拠に説明せよ）】\n"
+            + _ep_json[:2000]
+            + "\n上記ExecutionPlanの各フェーズ・タスク・KPI・依存関係を根拠にして補足説明のみ行え。架空の数値・タスク追加は禁止。"
+        )
+    if _mk in _MODE_INSTRUCTIONS:
+        system_prompt = _MODE_INSTRUCTIONS[_mk] + "\n\n" + system_prompt
+
+    # 画像データ抽出
+    image_b64 = None
+    image_mime = "image/png"
+    clean_messages = []
+    for msg in messages:
+        c = msg["content"]
+        if "__IMAGE_B64__:" in c:
+            parts = c.split("__IMAGE_B64__:", 1)
+            prefix_text = parts[0].strip()
+            img_part = parts[1]
+            sp = img_part.split(":", 1)
+            if len(sp) == 2:
+                image_mime, image_b64 = sp[0], sp[1]
+                if "\n" in image_b64:
+                    image_b64 = image_b64.split("\n")[0]
+            clean_messages.append({"role": msg["role"], "content": prefix_text or "この画像を分析してください"})
+        else:
+            clean_messages.append(msg)
+
+    # 画像生成判定
+    generated_images = []
+    if _is_image_gen_request(req.message, has_image=image_b64 is not None):
+        try:
+            reply, generated_images = _generate_image(req.message, image_b64, image_mime)
+        except Exception as _e:
+            reply = f"画像生成エラー: {_e}"
+    else:
+        try:
+            reply = call_llm(
+                system_prompt=system_prompt,
+                messages=clean_messages,
+                ai_tier=req.ai_tier,
+                image_b64=image_b64,
+                image_mime=image_mime,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"AI呼び出しエラー: {e}")
+
+    # suggested cases 生成
+    cases = []
+    try:
+        _cases_prompt = f"以下の会話に対して、ユーザーが次に相談しそうな事案を3件、日本語で1行ずつ返せ。マーク不要。\nQ: {req.message}\nA: {reply[:500]}"
+        _cases_raw = call_llm(
+            system_prompt="次の相談候補を3件だけ出力せよ。余分なテキスト不要。",
+            messages=[{"role": "user", "content": _cases_prompt}],
+            ai_tier="core", max_tokens=256
+        )
+        cases = [l.strip() for l in _cases_raw.strip().split("\n") if l.strip()][:3]
+    except Exception:
+        cases = []
+
+    # 構造化データ生成
+    structured = None
+    if not generated_images and len(req.message.strip()) > 5:
+        # planning mode: execution_plan_obj から直接生成
+        if _mk == "planning" and execution_plan_obj and isinstance(execution_plan_obj, dict):
+            _tasks = execution_plan_obj.get("tasks", [])
+            # fallback補完済みのため4項目チェック省略
+            _plan_valid = True
+            if _plan_valid:
+                _ep_current = [f"[{t.get('phase','')}] {t.get('objective','')} / 期限:{t.get('due_days','')}日 / 担当:{t.get('owner','')} / KPI:{t.get('kpi','')}" for t in _tasks[:3]]
+                _ep_graph = execution_plan_obj.get("graph", {})
+                _ep_critical = execution_plan_obj.get("critical_path", [])
+                structured = {
+                    "summary": execution_plan_obj.get("summary", req.message[:60]),
+                    "execution_plan": {
+                        "phases": execution_plan_obj.get("phases", []),
+                        "tasks": _tasks,
+                        "graph": _ep_graph,
+                        "critical_path": _ep_critical,
+                        "dependencies": execution_plan_obj.get("dependencies", []),
+                        "blockers": execution_plan_obj.get("blockers", []),
+                        "kpis": execution_plan_obj.get("kpis", []),
+                        "checkpoints": execution_plan_obj.get("checkpoints", []),
+                        "risks": execution_plan_obj.get("risks", []),
+                    },
+                    "cards": {
+                        "current": _ep_current if _ep_current else ["実行計画を生成しました"],
+                        "risk": execution_plan_obj.get("risks", [])[:3] or ["リスク情報なし"],
+                        "plan": [t.get("objective", "") for t in _tasks[:3]] or ["プラン情報なし"],
+                    },
+                    "analysis": {"type": "実行計画", "urgency": "高", "importance": "高", "mode": "PLANNING"},
+                    "actions": [t.get("objective", "") for t in _tasks[:5] if t.get("objective")],
+                    "value_message": f"実行計画: {len(_tasks)}タスク / critical_path:{len(_ep_critical)}ステップ",
+                }
+        else:
+            try:
+                import json as _json_s, re as _re_s
+                _sp = (
+                    "次のJSONキー構造のみで回答せよ。前置き禁止。コードブロック禁止。\n"
+                    "必須キー: summary, cards, analysis, actions, value_message\n"
+                    "cards必須キー: current, risk, plan (各3件の文字列配列)\n"
+                    "analysis必須キー: type, urgency, importance, mode\n"
+                    "urgency/importanceは必ず '高'/'中'/'低' のいずれか\n"
+                    f"\n相談: {req.message[:300]}\n"
+                    f"回答要約: {reply[:600]}\n"
+                )
+                _sr = call_llm(
+                    system_prompt="JSONのみ出力。指定キー構造厳守。",
+                    messages=[{"role": "user", "content": _sp}],
+                    ai_tier="core", max_tokens=700
+                )
+                _m = _re_s.search(r'\{.*\}', _sr, _re_s.DOTALL)
+                if _m:
+                    _parsed = _json_s.loads(_m.group(0))
+                    if all(k in _parsed for k in ["summary","cards","analysis","actions","value_message"]):
+                        structured = _parsed
+            except Exception as _se:
+                structured = None
+
+    # レベルスコア加算
+    _delta = _calc_score(req.message, tenant_id)
+    _update_level_score(tenant_id, uid, _delta)
+
+    # sources
+    _sources = [{"text": (c.get("text","") or "")[:200], "score": float(c.get("_score",0)), "source_id": str(c.get("source_id","")), "is_retrieved": True} for c in _rag_chunks] if _rag_chunks else []
+    _confirmation_choices = []
+
+    _save_message(tenant_id, uid, chat_id, "user", req.message)
+    reply = __import__("re").sub(r" {2,}", " ", reply).strip()
+    _save_message(tenant_id, uid, chat_id, "assistant", reply, cases=cases, structured=structured, sources=_sources)
+
+    # usage_log
+    try:
+        import datetime as _dt
+        get_db().collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (_dt.datetime.utcnow() + _dt.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False, "purpose_mode": _mk})
+    except Exception:
+        pass
+
+    # GCS画像保存
+    if generated_images:
+        try:
+            import os as _os, base64 as _b64_gs
+            from google.cloud import storage as _gcs
+            bucket_name = _os.environ.get("CENTRAL_BLOB_BUCKET","").strip()
+            if bucket_name:
+                _gc = _gcs.Client()
+                _bkt = _gc.bucket(bucket_name)
+                for _ii, _img in enumerate(generated_images):
+                    try:
+                        _img_bytes = _b64_gs.b64decode(_img["data"])
+                        _ext = "png" if "png" in _img.get("mime_type","") else "jpg"
+                        _path = f"chat_images/{tenant_id}/{uid}/{uuid.uuid4().hex[:8]}.{_ext}"
+                        _blob = _bkt.blob(_path)
+                        _blob.upload_from_string(_img_bytes, content_type=_img.get("mime_type","image/png"))
+                        generated_images[_ii]["gcs_url"] = f"https://storage.googleapis.com/{bucket_name}/{_path}"
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    _safe_images = [{"mime_type": img.get("mime_type","image/png"), "gcs_url": img.get("gcs_url","")} for img in generated_images]
+    # DEBUG: ResponseValidationError原因調査
+    try:
+        from fastapi.encoders import jsonable_encoder as _jae
+        import json as _jdebug
+        _resp_debug = _jae(dict(
+            reply=reply, chat_id="x", cases=cases,
+            images=_safe_images, structured=structured,
+            sources=_sources, confirmation_choices=_confirmation_choices,
+            intent=intent_state if isinstance(intent_state, dict) else None,
+            intent_label=query_plan.get("intent","") if isinstance(query_plan, dict) else None,
+        ))
+    except Exception as _dbe:
+        pass
+    return ChatResponse(
+        reply=reply,
+        chat_id=chat_id,
+        msg_id=str(uuid.uuid4()),
+        cases=cases,
+        images=_safe_images,
+        structured=structured,
+        sources=_sources,
+        confirmation_choices=_confirmation_choices,
+        intent=intent_state if isinstance(intent_state, dict) else None,
+        intent_label=query_plan.get("intent","") if isinstance(query_plan, dict) else None,
+    )
+
+# ==============================
+# ASCEND 説明辞書
+# ==============================
+ASCEND_FEATURE_GUIDE = {
+    "ASCENDとは": """ASCENDは、戦略・数値・構造・リスクを統合し、経営判断を支援するAIコンサルティングエンジンです。
+診断・分析・実行支援に特化した経営判断プラットフォームであり、印象ではなく構造、直感ではなく数値を軸に、課題整理・意思決定・施策設計を支援します。""",
+    "ASCENDの名前の由来": """ASCENDは、経営判断の解像度を上げ、事業・組織・戦略を次の段階へ上昇させる思想を表します。
+A — Architectural Analysis（構造解剖）
+S — Scoring & Scale（階級スコア）
+C — Case-driven RAG（事例駆動検索）
+E — Executor Strategy（戦術執行）
+N — Nurturing / Mentor（育成・導師）
+D — Dynamic Routing & Diagnosis（動的診断）""",
+    "SWIFT": """SWIFTは、高速レスポンス向けのAIエンジンです。
+日常的な戦略相談、施策整理、簡易分析、初期の論点整理に適しています。""",
+    "ADVANCE": """ADVANCEは、高精度分析向けのAIエンジンです。
+全19モードに対応し、ファイル診断、固定概念レポート、画像生成、個人相談などの高度機能が解放されます。""",
+    "SUPREME": """SUPREMEは、ASCENDの最上位AIエンジンです。
+全機能解放、投資シグナルを含む全19モード、最高難度の経営判断に対応します。""",
+    "SWIFT / ADVANCE / SUPREME": """ASCENDのAIエンジンは3段階です。
+
+SWIFT（迅速）: 高速レスポンス向け。日常的な戦略相談、施策整理、簡易分析に適しています。
+ADVANCE（高度）: 全19モード対応の高精度エンジン。ファイル診断、固定概念レポート、画像生成、個人相談などが解放されます。
+SUPREME（至高）: 全機能解放の最上位エンジン。投資シグナルを含む全19モードに対応し、最高難度の経営判断を支援します。""",
+    "AIチャット": """AIチャットは、テキスト・画像・ファイルに対応するASCENDのメインチャット機能です。
+経営相談、課題整理、施策立案、数値分析、構造分解などを対話形式で行います。""",
+    "画像解析": """画像解析は、アップロードされた画像をAIが読み取り、内容・構造・文字・配置・デザイン・改善点を解析する機能です。""",
+    "ファイル解析": """ファイル解析は、PDF・Excel・CSV・テキスト等を読み込み、内容の要約、論点整理、数値確認、改善提案を行う機能です。""",
+    "現状課題診断": """現状課題診断は、入力された現状を構造化し、本質課題・原因・優先順位を診断する機能です。""",
+    "構造診断": """構造診断は、事象を要素分解し、原因・関係性・支配構造を可視化する診断です。""",
+    "課題仮説": """課題仮説は、現状情報から複数の課題仮説を生成し、検証すべき論点を整理する機能です。""",
+    "比較分析": """比較分析は、複数の選択肢を多面的に比較評価する機能です。メリット、リスク、実行難度、優先度を整理し、選択判断を支援します。""",
+    "矛盾検知": """矛盾検知は、計画・発言・方針・数値の中にある論理矛盾や整合性のズレを検出する機能です。""",
+    "実行計画": """実行計画は、目標に対して具体的な手順・優先順位・ロードマップを設計する機能です。""",
+    "投資シグナル": """投資シグナルは、市場・銘柄・条件をもとに投資判断の補助シグナルを分析する機能です。投資判断を保証するものではなく、判断材料を構造化するための分析支援機能です。""",
+    "思考マップ": """思考マップは、思考・課題・選択肢・因果関係をマップ化し、見落としを減らす機能です。""",
+    "ファイル診断": """ファイル診断は、Excel・PDF等の資料を数値分析とAI解釈で深掘りする診断機能です。資料全体の構造、異常、傾向、改善点を分析します。""",
+    "未来分岐シミュレーター": """未来分岐シミュレーターは、現在の状況・選択肢・リスク・制約条件をもとに、将来起こり得る複数の分岐を予測する機能です。""",
+    "Decision Metrics": """Decision Metricsは、意思決定を複数指標でスコアリングし、判断の質・リスク・実行可能性を可視化する機能です。""",
+    "固定概念レポート": """固定概念レポートは、ユーザーの思考傾向や判断の癖を分析し、固定概念・盲点・改善視点を提示する機能です。""",
+    "プレゼン資料生成": """プレゼン資料生成は、入力内容をもとに、提案・報告・戦略説明用のスライド構成を生成する機能です。""",
+    "プロファイル生成": """プロファイル生成は、特徴入力をもとに、人柄・行動パターン・強み・接し方を推定する機能です。""",
+    "顧客AIマネジメント": """顧客AIマネジメントは、顧客心理状態を時系列で推論し、接客最適化・離脱防止・担当者相性・店舗全体知能を統合する顧客管理知能OSです。
+CRM高度化、リピート維持、顧客傾向分析、接客品質改善、顧客行動予測を支援します。
+恋愛誘導、依存形成、嫉妬操作、執着誘導を目的とする機能ではありません。""",
+    "画像生成": """画像生成は、指示文から画像を生成する機能です。企画、広告、世界観設計、ビジュアル案作成などに使用できます。
+「画像生成とは？」は機能説明であり、実際に画像を生成する依頼とは区別されます。""",
+    "生成画像ギャラリー": """生成画像ギャラリーは、生成した画像を一覧管理する機能です。過去に生成した画像を確認し、再利用や比較に使えます。""",
+    "個人相談": """個人相談は、通常チャットより深い個別相談を行う機能です。課題、意思決定、方針設計、事業相談などを個別スレッドとして扱います。""",
+    "ランクシステム": """ランクシステムは、活用度に応じてlevel_scoreが上がり、称号が変化する成長可視化システムです。称号は、追従者、実行者、戦略家、設計者の4段階です。""",
+    "マイページ": """マイページは、統計、履歴、設定、レポート確認を行う場所です。過去の診断、固定概念レポート、利用履歴などを確認できます。""",
+    "プラン管理": """プラン管理は、現在の利用プランと解放されている機能を確認する機能です。未開放機能は、プラン変更または管理者による権限付与で利用可能になります。""",
+    "用途別モード切替": """用途別モード切替は、相談目的に応じてAIの回答視点を切り替える機能です。相談、分析、実行、数値、構造など、目的に合った出力へ調整します。""",
+    "NUMERICモード": """NUMERICモードは、数値・KPI・売上・コスト分析に特化したモードです。数値・比率・計算式を使って定量的に回答します。""",
+    "STRATEGYモード": """STRATEGYモードは、競合分析・差別化・ポジショニング戦略に特化したモードです。3C/4P/SWOT等のフレームワークを活用し、戦略的選択肢と優先順位を提示します。""",
+    "CONTROLモード": """CONTROLモードは、組織・権限・業務フロー・マネジメント構造に特化したモードです。責任分担・権限設計・フロー最適化の観点から回答します。""",
+    "GROWTHモード": """GROWTHモードは、スキル・習慣・成長設計に特化したモードです。具体的なトレーニング方法・習慣化ステップ・成長指標を提示します。""",
+    "ANALYSISモード": """ANALYSISモードは、データ・事象の多角的解析に特化したモードです。因果関係・相関・パターンを分解し、複数の解釈仮説を提示します。""",
+    "PLANNINGモード": """PLANNINGモードは、ロードマップ・フェーズ設計に特化したモードです。時系列・マイルストーン・依存関係を明示したアクションプランを提示します。""",
+    "RISKモード": """RISKモードは、リスク特定・評価・対策設計に特化したモードです。発生確率×影響度でリスクを評価し、回避・軽減・転嫁・受容の選択肢を提示します。""",
+    "MARKETINGモード": """MARKETINGモードは、集客・ブランディング・広告施策に特化したモードです。ターゲット定義・チャネル選定・CVR改善の観点から具体施策を提示します。""",
+    "DIAGNOSISモード": """DIAGNOSISモードは、現状課題の発見・根本原因分析に特化したモードです。なぜなぜ分析・ロジックツリー等で根本原因を特定します。""",
+    "FORECASTモード": """FORECASTモードは、将来予測・シナリオ分析に特化したモードです。楽観・中立・悲観の3シナリオを定量的に提示します。""",
+    "FINANCEモード": """FINANCEモードは、財務・投資・資金計画分析に特化したモードです。ROI・回収期間・キャッシュフロー・損益分岐点を数値で示します。""",
+    "HRモード": """HRモードは、採用・評価・組織設計・人材育成に特化したモードです。評価基準・採用要件・育成ステップを構造的に提示します。""",
+    "NEGOTIATIONモード": """NEGOTIATIONモードは、交渉・説得・合意形成戦略に特化したモードです。相手の利害・BATNAを分析し、Win-Winの合意シナリオと交渉戦術を提示します。""",
+    "CREATIVEモード": """CREATIVEモードは、アイデア発想・コンセプト設計に特化したモードです。既存の枠を超えた発想を複数提示し、実現可能性と独自性を評価します。""",
+    "SUMMARYモード": """SUMMARYモードは、要約・整理に特化したモードです。要点を3〜5項目に絞り、階層構造で簡潔に整理します。""",
+    "LEGALモード": """LEGALモードは、法務・規約・コンプライアンスの解説に特化したモードです。法的助言ではなく情報提供として提示します。""",
+    "COACHINGモード": """COACHINGモードは、自己変革・思考パターン改善に特化したモードです。質問・内省促進・気づきの提供を優先します。""",
+    "OPSモード": """OPSモードは、業務改善・効率化・オペレーション最適化に特化したモードです。ボトルネック特定・工数削減・標準化・自動化の観点から改善策を提示します。""",
+    "TECHモード": """TECHモードは、技術・エンジニアリング・システム設計に特化したモードです。技術的トレードオフ・アーキテクチャ選定・実装方針を構造的に提示します。""",
+}
+
+ASCEND_FAQ_GUIDE = {
+    "プランによって使える機能は違いますか": "はい。利用できる機能はプランや管理者権限によって変わります。ADVANCEやSUPREMEでは、ファイル診断、固定概念レポート、画像生成、個人相談、投資シグナルなどの上位機能が解放されます。",
+    "ランクはどうやって上がりますか": "ランクは活用度を示すlevel_scoreに応じて変化します。チャット、診断、レポート活用などの利用によりスコアが加算され、追従者、実行者、戦略家、設計者へ進みます。",
+    "ファイル診断はどんな形式に対応していますか": "ファイル診断は、Excel、PDF、CSV、テキスト等の資料分析を想定しています。",
+    "登録業種以外の質問もできますか": "可能です。登録業種は回答精度や文脈最適化のための基準ですが、登録業種以外の相談もできます。",
+    "画像解析・ファイル解析の精度はどの程度ですか": "精度は入力資料の品質、文字の読み取りやすさ、ファイル構造、データ量に依存します。最終判断には人間の確認が必要です。",
+    "個人相談と現状課題診断の違いは何ですか": "個人相談は個別の相談スレッドとして深く継続的に扱う機能です。現状課題診断は、入力された現状を構造化し、本質課題や優先順位を診断する機能です。",
+    "Decision Metricsとは何ですか": "Decision Metricsは、意思決定を複数指標でスコアリングし、判断の質、リスク、実行可能性を可視化する機能です。",
+    "投資シグナル機能は誰でも使えますか": "投資シグナルは上位機能であり、利用可否はプランや権限設定に依存します。投資判断を保証するものではなく、判断材料の分析支援です。",
+    "履歴やレポートのデータは保存されますか": "チャット履歴、診断履歴、レポート等はマイページなどで確認できるよう保存されます。",
+    "未開放と表示される機能はどうすれば使えますか": "未開放機能は、プランのアップグレードまたは管理者による権限付与により利用可能になります。",
+    "登録業種とは何ですか": "登録業種は、ASCENDが回答や診断を最適化するための業種文脈です。",
+    "ファイル診断と通常チャットのファイル解析の違いは": "通常チャットのファイル解析は資料を読みながら要約や質問回答を行う機能です。ファイル診断は数値分析とAI解釈により資料全体を診断する、より深い分析機能です。",
+    "ASCENDはどんな業種に対応していますか": "業種を問わず利用できます。経営、戦略、マーケティング、財務、人事、組織、営業、接客など幅広い領域に対応しています。",
+    "チャット履歴はどこで確認できますか": "マイページまたはチャット画面の履歴一覧から確認できます。過去のセッションを呼び出して継続相談が可能です。",
+    "診断結果は保存されますか": "診断結果はマイページの履歴から確認できます。固定概念レポートなども保存されます。",
+    "複数の質問を一度に送れますか": "可能です。まとめて入力することで、ASCENDが論点を整理して構造的に回答します。",
+    "ASCENDは何言語に対応していますか": "主に日本語に最適化されています。英語での入力にも対応していますが、日本語での利用を推奨します。",
+    "画像は何枚まで添付できますか": "1回のメッセージに1枚の画像を添付できます。複数画像の場合は複数回に分けて送信してください。",
+    "ファイルのサイズ制限はありますか": "ファイルサイズや形式によって処理可能な範囲が異なります。大容量ファイルの場合は分割して送信することを推奨します。",
+    "モードはいつでも切り替えられますか": "はい。チャット画面から用途別モードをいつでも切り替えられます。最大19モードに対応しています。",
+    "ASCENDは投資助言を行いますか": "投資助言は行いません。投資シグナル機能は判断材料の構造化・分析支援であり、投資の推奨・保証はしません。",
+    "固定概念レポートはどのくらいの頻度で使えますか": "利用回数の制限はプランによって異なります。定期的に活用することで、思考の癖や盲点を継続的に確認できます。",
+    "未来分岐シミュレーターはどう使いますか": "現在の状況、選択肢、制約条件、リスクを入力すると、複数の将来シナリオと打ち手を構造化して提示します。",
+    "プロファイル生成はどんな場面で使いますか": "人物の特徴、行動傾向、強み、対応方針を整理する場面で使います。採用、顧客理解、組織設計などに活用できます。",
+    "顧客AIマネジメントは誰向けですか": "店舗経営者、接客責任者、CRM担当者向けです。顧客の離脱防止、接客最適化、顧客行動予測などを支援します。",
+    "プレゼン資料生成で何が作れますか": "提案書、報告書、戦略説明資料のスライド構成と章立てを生成します。実際のPowerPointファイルではなく、構成・骨子の設計を行います。",
+    "思考マップはどんな時に使いますか": "複雑な課題、多数の選択肢、因果関係が絡み合う状況を整理する時に使います。見落としを減らし、思考を構造化します。",
+    "矛盾検知は何を検出しますか": "計画・発言・方針・数値の中にある論理矛盾、前提のズレ、整合性の欠如を検出します。戦略や提案の破綻を事前に発見するために使います。",
+    "比較分析では何を比べられますか": "複数の選択肢、施策案、戦略オプションを多面的に比較します。メリット、リスク、実行難度、優先度、費用対効果などを軸に評価します。",
+    "課題仮説はどう活用しますか": "原因が確定していない段階で、考えるべき仮説を広げるために使います。複数の仮説を生成し、検証すべき論点を整理します。",
+    "実行計画ではどんな出力が得られますか": "目標達成に向けた具体的な手順、優先順位、ロードマップ、各フェーズのアクションが得られます。",
+    "ASCENDのランク称号は何段階ですか": "4段階です。追従者、実行者、戦略家、設計者の順に上昇します。活用度に応じてlevel_scoreが加算されます。",
+}
+
+def _ascend_static_answer(query: str):
+    """辞書ヒット時: (key, text) / ヒットなし: ("", "")"""
+    import re as _re_asd
+    q = query or ""
+    q_norm = q.replace("？","").replace("?","").replace("\u3000"," ").replace("　"," ").strip()
+    q_low = q_norm.lower()
+
+    # 全機能一覧
+    if any(k in q for k in ["全機能", "機能一覧", "何ができる", "できること", "全部教えて", "すべての機能"]):
+        parts = ["ASCENDの主な機能は以下です。"]
+        for name, desc in ASCEND_FEATURE_GUIDE.items():
+            if name in ["ASCENDとは", "ASCENDの名前の由来", "SWIFT / ADVANCE / SUPREME"]:
+                continue
+            parts.append(f"■ {name}\n{desc}")
+        return "全機能一覧", "\n\n".join(parts)
+
+    # AIエンジン比較
+    if "SWIFT" in q and "ADVANCE" in q and "SUPREME" in q:
+        return "AIエンジン比較", ASCEND_FEATURE_GUIDE["SWIFT / ADVANCE / SUPREME"]
+
+    # FAQ辞書: 柔軟マッチ
+    for key, val in ASCEND_FAQ_GUIDE.items():
+        key_norm = key.replace("？","").replace("?","").replace("　"," ").strip()
+        if key_norm in q_norm:
+            return key, val
+        key_words = [w for w in _re_asd.split(r"[\s]+", key_norm) if len(w) >= 2]
+        if key_words and all(w in q_norm for w in key_words):
+            return key, val
+
+    # FEATURE辞書: キー直接マッチ + バリエーション
+    for key, val in ASCEND_FEATURE_GUIDE.items():
+        if key in q:
+            return key, val
+        variants = [
+            key + "とは", key + "って", key + "を教えて", key + "の説明",
+            key + "について", key + "って何", key + "とは何", key + "の機能",
+            key + "の使い方", key + "はどう", key + "はどんな", key + "は何",
+        ]
+        if any(v in q_norm for v in variants):
+            return key, val
+        if key.lower() in q_low and len(key) >= 3:
+            return key, val
+
+    # 緩やかなキーワードマッチ
+    _loose_map = [
+        (["ASCENDとは","ASCEND とは","このシステムとは","このAIとは"], "ASCENDとは", ASCEND_FEATURE_GUIDE),
+        (["使い方","どう使","どうやって使","操作方法"], "AIチャット", ASCEND_FEATURE_GUIDE),
+        (["プランは","料金は","費用","月額","いくら"], "プランによって使える機能は違いますか", ASCEND_FAQ_GUIDE),
+        (["ランク","称号","レベル"], "ランクシステム", ASCEND_FEATURE_GUIDE),
+        (["マイページ","履歴確認"], "マイページ", ASCEND_FEATURE_GUIDE),
+        (["名前の由来","名称の意味","ASCENDの意味"], "ASCENDの名前の由来", ASCEND_FEATURE_GUIDE),
+    ]
+    for kws, dict_key, guide in _loose_map:
+        if any(kw in q for kw in kws):
+            val = guide.get(dict_key, "")
+            if val:
+                return dict_key, val
+
+    return "", ""
+
+
+    _MODE_INSTRUCTIONS = {
         "numeric":     "【NUMERICモード】数値・KPI・売上・コスト分析に特化せよ。必ず数値・比率・計算式を使って回答せよ。定性的な説明より定量的な根拠を優先せよ。",
         "strategy":    "【STRATEGYモード】競合分析・差別化・ポジショニング戦略に特化せよ。3C/4P/SWOT等のフレームワークを活用し、戦略的選択肢と優先順位を提示せよ。",
         "control":     "【CONTROLモード】組織・権限・業務フロー・マネジメント構造に特化せよ。責任分担・権限設計・フロー最適化の観点から回答せよ。",
@@ -670,8 +1358,13 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
         "coaching":    "【COACHINGモード】自己変革・思考パターン改善に特化せよ。質問・内省促進・気づきの提供を優先し、答えを与えるより考えさせる回答をせよ。",
         "ops":         "【OPSモード】業務改善・効率化・オペレーション最適化に特化せよ。ボトルネック特定・工数削減・標準化・自動化の観点から具体的改善策を提示せよ。",
         "tech":        "【TECHモード】技術・エンジニアリング・システム設計に特化せよ。技術的トレードオフ・アーキテクチャ選定・実装方針を構造的に提示せよ。",
+        "ascend":      "【ASCENDモード】ASCENDの機能・使い方・思想・プラン・AIエンジン・FAQ説明に特化せよ。system_prompt内のASCEND説明情報を最優先根拠とし、RAGナレッジ・汎用AI回答・キャラクター口調は使用禁止。絵文字・幼稚な口調禁止。機能概要・入力・出力・実務での使い道・経営判断上の価値を構造的に説明せよ。「分かりません」「専門外です」は絶対禁止。",
     }
     _mode_key = (req.purpose_mode or "auto").strip().lower()
+    # ASCEND説明クエリは強制的にascendモードへ
+    _ascend_explain_kws = ["ASCEND","使い方","とは","機能","名前の由来","SWIFT","ADVANCE","SUPREME","Decision Metrics","固定概念レポート","ファイル診断","プロファイル生成","顧客AIマネジメント","プレゼン資料生成","未来分岐シミュレーター","ランクシステム","プラン","マイページ","画像生成とは","何ができ"]
+    if _mode_key == "auto" and any(k in req.message for k in _ascend_explain_kws):
+        _mode_key = "ascend"
     if not is_talk and _mode_key in _MODE_INSTRUCTIONS and not _is_custom_replace:
         system_prompt = _MODE_INSTRUCTIONS[_mode_key] + "\n\n" + system_prompt
     # FINANCEモード時: Firestoreの実シグナルデータを注入
@@ -792,7 +1485,11 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
 
     # 画像生成判定
     generated_images = []
-    if _is_image_gen_request(req.message, has_image=image_b64 is not None):
+    from api.core.features import is_feature_enabled
+    _is_ascend_about = any(k in (req.message or "") for k in ["ASCEND","とは","使い方","機能","プロファイル生成","顧客AIマネジメント","画像生成とは","プレゼン資料生成","未来分岐シミュレーター","ファイル診断","Decision Metrics","固定概念レポート","ランクシステム","比較分析","構造診断","課題仮説","矛盾検知","実行計画","思考マップ","投資シグナル","個人相談","何ができ","料金は"])
+    if _is_image_gen_request(req.message, has_image=image_b64 is not None) and not _is_ascend_about and not is_feature_enabled(uid, "image_generation"):
+        reply = "画像生成は現在未開放のため使用できません。"
+    elif _is_image_gen_request(req.message, has_image=image_b64 is not None) and not _is_ascend_about:
         try:
             reply, generated_images = _generate_image(req.message, image_b64, image_mime)
         except Exception as _e:
@@ -816,7 +1513,6 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     if _rag_chunks and not generated_images:
         _max_sc = max((float(c.get("_score",0)) for c in _rag_chunks), default=0.0)
         _is_retrieved = len(_rag_chunks) > 0
-        print(f"[RAG_RETRIEVED] max_score={_max_sc:.3f} is_retrieved={_is_retrieved} chunks={len(_rag_chunks)}", flush=True)
         _RAG_USE_THRESHOLD = 0.3  # 実際に使われた閾値
         _sources = [
             {
@@ -843,6 +1539,11 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     except Exception as _cases_err:
         print(f"[CASES_ERROR] {_cases_err}", flush=True)
         cases = []
+    # ASCEND辞書ヒット時: 推奨をsuggestionsの先頭に追加
+    if _ascend_dict_hit:
+        _ascend_suggest = f"【ASCEND】{_ascend_dict_key}について詳しく教えて"
+        if _ascend_suggest not in cases:
+            cases = [_ascend_suggest] + cases[:2]
     # 構造化データ生成（戦略相談時のみ・画像生成・雑談は除外）
     structured = None
     _consulting_intents = {"相談", "意思決定", "分析", "作成", "予測", "投資"}
@@ -923,6 +1624,15 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
                         {"use_count_since_report": _fc_cnt},
                         merge=True
                     )
+                    # FC解放通知（12回到達時）
+                    if _fc_cnt == 12:
+                        _write_notification(
+                            uid=uid,
+                            notif_type="fc",
+                            title="🧠 固定概念レポートが解放されました！",
+                            body="マイページの「固定概念」タブでレポートを確認できます。",
+                            link_tab="fc",
+                        )
                 except Exception:
                     pass
                 for chunk in chunks:
@@ -1004,6 +1714,19 @@ def send_message(req: ChatRequest, payload: dict = Depends(verify_token)):
     except Exception:
         pass
 
+    # DEBUG: ResponseValidationError原因調査
+    try:
+        from fastapi.encoders import jsonable_encoder as _jae
+        import json as _jdebug
+        _resp_debug = _jae(dict(
+            reply=reply, chat_id=chat_id, cases=cases,
+            images=generated_images, structured=structured,
+            sources=_sources, confirmation_choices=_confirmation_choices,
+            intent=intent_state if isinstance(intent_state, dict) else None,
+            intent_label=query_plan.get('intent','') if isinstance(query_plan, dict) else None,
+        ))
+    except Exception as _dbe:
+        pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=cases, images=generated_images, structured=structured, sources=_sources, confirmation_choices=_confirmation_choices, intent=intent_state if isinstance(intent_state, dict) else None, intent_label=query_plan.get("intent","") if isinstance(query_plan, dict) else None)
 
 @router.get("/history/{chat_id}")
@@ -1161,7 +1884,9 @@ def _is_image_gen_request(text: str, has_image: bool = False) -> bool:
     has_action  = any(w in t for w in _ACTION_WORDS)
     has_edit    = any(w in t for w in _EDIT_WORDS)
     has_analysis= any(w in t for w in _ANALYSIS_WORDS)
-    if has_image and has_edit: return True
+    _INSTRUCTION_WORDS = ["変更","変えて","にして","してください","しろ","追加して","追加","にしろ","を変","色を","色に","背景を","削除","除去","切り取","合成","スタイル","モノクロ","白黒","明る","暗く","ぼかし","文字を","テキストを","ロゴを"]
+    has_instruction = any(w in t for w in _INSTRUCTION_WORDS)
+    if has_image and (has_edit or has_instruction): return True
     if has_subject and has_action and not has_analysis: return True
     return False
 
@@ -1173,39 +1898,100 @@ def _generate_image(prompt: str, image_b64: str = None, image_mime: str = "image
     api_key = os.environ.get("GEMINI_API_KEY","")
     client = _genai.Client(api_key=api_key) if api_key else _genai.Client()
     _IMAGE_MODELS = ["gemini-3.1-flash-image-preview","gemini-3-pro-image-preview","gemini-2.5-flash-image"]
-    try:
-        available = [m.name for m in client.models.list()]
-        candidates = [m for m in _IMAGE_MODELS if any(m in a for a in available)]
-        if not candidates: candidates = _IMAGE_MODELS
-    except Exception:
-        candidates = _IMAGE_MODELS
+    _EDIT_MODELS = ["gemini-2.5-flash-image","gemini-3-pro-image-preview"]
+    candidates = _EDIT_MODELS[:] if image_b64 else _IMAGE_MODELS[:]
+    print(f"[IMG_CANDIDATES] {candidates}", flush=True)
 
-    strict_prompt = (
-        "以下は画像生成の最終指示です。ユーザー指示を最優先し、勝手な解釈拡張・要素追加を極力しないこと。\n"
-        "明示された要素は必ず反映し、明示されていない要素は勝手に足さないこと。\n"
-        f"【ユーザー最終指示】\n{prompt}"
-    )
+    if image_b64:
+        strict_prompt = (
+            "以下は画像編集の最終指示です。ユーザー指示を最優先し、"
+            "勝手な解釈拡張・要素追加を極力しないこと。\n"
+            "明示された要素は必ず反映し、"
+            "明示されていない要素は変更しないこと。\n"
+            "参照画像を元に、以下の指示通りに編集した画像を返せ。\n"
+            f"【ユーザー最終指示】\n{prompt}"
+        )
+    else:
+        strict_prompt = (
+            "以下は画像生成の最終指示です。ユーザー指示を最優先し、"
+            "勝手な解釈拡張・要素追加を極力しないこと。\n"
+            "明示された要素は必ず反映し、"
+            "明示されていない要素は勝手に足さないこと。\n"
+            f"【ユーザー最終指示】\n{prompt}"
+        )
     user_parts = [_types.Part(text=strict_prompt)]
     if image_b64:
         try:
             img_bytes = _b64.b64decode(image_b64)
+            # 画像が大きすぎる場合はリサイズ（2MB超）
+            if len(img_bytes) > 2 * 1024 * 1024:
+                try:
+                    from PIL import Image as _PIL
+                    import io as _io2
+                    _im = _PIL.open(_io2.BytesIO(img_bytes))
+                    _im.thumbnail((1024, 1024), _PIL.LANCZOS)
+                    _buf = _io2.BytesIO()
+                    _im.save(_buf, format="JPEG", quality=85)
+                    img_bytes = _buf.getvalue()
+                    image_mime = "image/jpeg"
+                    print(f"[IMG_RESIZE] resized to {len(img_bytes)} bytes", flush=True)
+                except Exception as _re: print(f"[IMG_RESIZE_SKIP] {_re}", flush=True)
+            # 編集時は常にJPEGに正規化
+            try:
+                from PIL import Image as _PILc
+                import io as _ioc
+                _imc = _PILc.open(_ioc.BytesIO(img_bytes)).convert("RGB")
+                _bufc = _ioc.BytesIO()
+                _imc.save(_bufc, format="JPEG", quality=92)
+                img_bytes = _bufc.getvalue()
+                image_mime = "image/jpeg"
+                print(f"[IMG_NORMALIZE] JPEG {len(img_bytes)} bytes", flush=True)
+            except Exception as _ce: print(f"[IMG_NORMALIZE_SKIP] {_ce}", flush=True)
+            print(f"[IMG_SIZE] bytes={len(img_bytes)}", flush=True)
             user_parts.append(_types.Part(inline_data=_types.Blob(mime_type=image_mime, data=img_bytes)))
-        except Exception:
-            pass
+        except Exception as _img_e:
+            print(f"[IMG_INPUT_ERROR] {type(_img_e).__name__}: {_img_e}", flush=True)
+            raise
     contents = [_types.Content(role="user", parts=user_parts)]
     try:
-        cfg = _types.GenerateContentConfig(response_modalities=["TEXT","IMAGE"], temperature=0.2)
-    except Exception:
-        cfg = None
-
-    for model in candidates[:2]:
+        _safety = [
+            _types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+            _types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+            _types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+            _types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+        ]
+        _modalities = ["TEXT","IMAGE"]
+        cfg = _types.GenerateContentConfig(response_modalities=_modalities, temperature=1.0, safety_settings=_safety)
+    except Exception as _cfg_e:
+        print(f"[IMG_CFG_WARN] safety cfg failed: {_cfg_e}", flush=True)
         try:
-            res = client.models.generate_content(model=model, contents=contents, config=cfg) if cfg else client.models.generate_content(model=model, contents=contents)
+            cfg = _types.GenerateContentConfig(response_modalities=["TEXT","IMAGE"], temperature=1.0)
+        except Exception as _cfg_e2:
+            print(f"[IMG_CFG_WARN2] basic cfg failed: {_cfg_e2}", flush=True)
+            cfg = None
+
+    for model in candidates:
+        try:
+            print(f"[IMG_GEN_START] model={model} has_image={image_b64 is not None}", flush=True)
+            import concurrent.futures as _cf
+            _gen_fn = (lambda: client.models.generate_content(model=model, contents=contents, config=cfg)) if cfg else (lambda: client.models.generate_content(model=model, contents=contents))
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                _ft = _ex.submit(_gen_fn)
+                try:
+                    res = _ft.result(timeout=90)
+                except _cf.TimeoutError:
+                    print(f"[IMG_GEN_TIMEOUT] model={model}", flush=True)
+                    continue
+            print(f"[IMG_GEN_DONE] model={model}", flush=True)
             images = []
             all_parts = getattr(res, "parts", None) or []
             if not all_parts:
                 for cand in (getattr(res,"candidates",None) or []):
                     all_parts.extend(getattr(getattr(cand,"content",None),"parts",None) or [])
+            print(f"[IMG_DEBUG] model={model} parts={len(all_parts)} candidates={len(getattr(res,'candidates',None) or [])} finish={[(getattr(c,'finish_reason',None)) for c in (getattr(res,'candidates',None) or [])]}", flush=True)
+            print(f"[IMG_FEEDBACK] prompt_feedback={getattr(res,'prompt_feedback',None)} safety={[(getattr(c,'safety_ratings',None)) for c in (getattr(res,'candidates',None) or [])]}", flush=True)
+            for i,part in enumerate(all_parts):
+                print(f"[IMG_PART] i={i} has_inline={getattr(part,'inline_data',None) is not None} has_text={bool(getattr(part,'text',None))}", flush=True)
             for part in all_parts:
                 blob = getattr(part,"inline_data",None)
                 if blob and (getattr(blob,"mime_type","") or "").startswith("image/"):
@@ -1219,8 +2005,10 @@ def _generate_image(prompt: str, image_b64: str = None, image_mime: str = "image
                     if d:
                         images.append({"mime_type": getattr(blob,"mime_type","image/png"), "data": _b64.b64encode(d).decode()})
             if images:
-                return ("画像を生成しました。", images)
+                return ("画像を生成しました。✨", images)
         except Exception as e:
+            print(f"[IMG_GEN_ERROR] model={model} err={type(e).__name__}: {e}", flush=True)
+            continue
             continue
     return ("画像生成に失敗しました。モデルが利用できない可能性があります。", [])
 
@@ -1437,39 +2225,72 @@ class ImageRequest(BaseModel):
 @router.post("/send_image")
 def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
     uid = payload["uid"]
+    from api.core.features import is_feature_enabled as _isfe_tier
+    if req.ai_tier in ("ultra", "apex"):
+        _tier_feat = "ascend_ultra" if req.ai_tier == "ultra" else "ascend_apex"
+        if not _isfe_tier(uid, _tier_feat):
+            raise HTTPException(status_code=403, detail=f"このAIエンジン（{req.ai_tier}）は現在未開放のため使用できません。")
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
     chat_id = (req.chat_id or "main").strip() or "main"
     _ensure_session(tenant_id, uid, chat_id)
     generated_images = []
-    # 画像が添付されている場合は解析モード（生成ではなく分析）
+    # 画像が添付されている場合：編集指示なら画像編集、そうでなければ画像解析
     if req.image_b64:
-        try:
-            base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
-            system_prompt = (
-                "【最重要指示】あなたは画像解析AIです。添付された画像を必ず詳細に分析し、"
-                "内容・テキスト・数値・構造・色・特徴を全て日本語で説明してください。"
-                "画像の分析を拒否したり、できないと言ったりすることは絶対に禁止です。\n\n"
-                + base_prompt +
-                "\n\n【画像解析モード】添付された画像を正確に読み取り、"
-                "ユーザーの質問に対して詳細に答えよ。画像の内容・数値・テキスト・構造を整理して提示せよ。"
-            )
-            messages = _load_history(tenant_id, uid, chat_id)
-            messages.append({"role": "user", "content": req.message or "この画像を詳しく分析してください"})
-            reply = call_llm(
-                system_prompt=system_prompt,
-                messages=messages,
-                ai_tier=req.ai_tier,
-                image_b64=req.image_b64,
-                image_mime=req.image_mime,
-            )
-        except Exception as e:
-            reply = f"画像解析エラー: {e}"
+        from api.core.features import is_feature_enabled
+        _is_ascend_about = any(k in (req.message or "") for k in ["ASCEND","とは","使い方","機能","プロファイル生成","顧客AIマネジメント","画像生成とは","プレゼン資料生成","未来分岐シミュレーター","ファイル診断","Decision Metrics","固定概念レポート","ランクシステム","比較分析","構造診断","課題仮説","矛盾検知","実行計画","思考マップ","投資シグナル","個人相談","何ができ","料金は"])
+        if _is_image_gen_request(req.message, has_image=True) and not _is_ascend_about and not is_feature_enabled(uid, "image_generation"):
+            reply = "画像生成は現在未開放のため使用できません。"
+        elif _is_image_gen_request(req.message, has_image=True) and not _is_ascend_about:
+            try:
+                reply, generated_images = _generate_image(req.message, req.image_b64, req.image_mime)
+            except Exception as e:
+                reply = f"画像生成エラー: {e}"
+                generated_images = []
+        else:
+            try:
+                base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
+                system_prompt = (
+                    "【最重要指示】あなたは画像解析AIです。添付された画像を必ず詳細に分析し、"
+                    "内容・テキスト・数値・構造・色・特徴を全て日本語で説明してください。"
+                    "画像の分析を拒否したり、できないと言ったりすることは絶対に禁止です。\n\n"
+                    + base_prompt +
+                    "\n\n【画像解析モード】添付された画像を正確に読み取り、"
+                    "ユーザーの質問に対して詳細に答えよ。画像の内容・数値・テキスト・構造を整理して提示せよ。"
+                )
+                messages = _load_history(tenant_id, uid, chat_id)
+                messages.append({"role": "user", "content": req.message or "この画像を詳しく分析してください"})
+                reply = call_llm(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    ai_tier=req.ai_tier,
+                    image_b64=req.image_b64,
+                    image_mime=req.image_mime,
+                )
+            except Exception as e:
+                reply = f"画像解析エラー: {e}"
     else:
-        try:
-            reply, generated_images = _generate_image(req.message, req.image_b64, req.image_mime)
-        except Exception as e:
-            reply = f"画像生成エラー: {e}"
-            generated_images = []
+        from api.core.features import is_feature_enabled
+        _is_ascend_about = any(k in (req.message or "") for k in ["ASCEND","とは","使い方","機能","プロファイル生成","顧客AIマネジメント","画像生成とは","プレゼン資料生成","未来分岐シミュレーター","ファイル診断","Decision Metrics","固定概念レポート","ランクシステム","比較分析","構造診断","課題仮説","矛盾検知","実行計画","思考マップ","投資シグナル","個人相談","何ができ","料金は"])
+        if _is_image_gen_request(req.message, has_image=False) and not _is_ascend_about and not is_feature_enabled(uid, "image_generation"):
+            reply = "画像生成は現在未開放のため使用できません。"
+        elif _is_image_gen_request(req.message, has_image=False) and not _is_ascend_about:
+            try:
+                reply, generated_images = _generate_image(req.message, None, req.image_mime)
+            except Exception as e:
+                reply = f"画像生成エラー: {e}"
+                generated_images = []
+        else:
+            try:
+                base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
+                messages = _load_history(tenant_id, uid, chat_id)
+                messages.append({"role": "user", "content": req.message})
+                reply = call_llm(
+                    system_prompt=base_prompt,
+                    messages=messages,
+                    ai_tier=req.ai_tier,
+                )
+            except Exception as e:
+                reply = f"AI呼び出しエラー: {e}"
     gcs_image_urls = []
     if generated_images:
         try:
@@ -1495,11 +2316,9 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
             pass
     # Firestoreに画像記録
     _db_si = get_db()
-    print(f"[GALLERY_SI_DEBUG] generated_images count: {len(generated_images)}", flush=True)
     for _img in generated_images:
         try:
             _img_id = uuid.uuid4().hex
-            print(f"[GALLERY_SI_DEBUG] saving uid={uid} gcs_url={_img.get('gcs_url','')[:60]}", flush=True)
             _db_si.collection("image_gallery").document(uid).collection("images").document(_img_id).set({
                 "image_id": _img_id,
                 "uid": uid,
@@ -1509,19 +2328,19 @@ def send_image(req: ImageRequest, payload: dict = Depends(verify_token)):
                 "prompt": (req.message or "")[:500],
                 "created_at": __import__("datetime").datetime.utcnow().isoformat(),
             })
-            print(f"[GALLERY_SI_DEBUG] Firestore save OK", flush=True)
         except Exception as _ge:
-            print(f"[GALLERY_SI_DEBUG] Firestore save ERROR: {_ge}", flush=True)
+            pass
     _save_message(tenant_id, uid, chat_id, "user", req.message)
     reply = __import__("re").sub(r" {2,}", " ", reply).strip()
     _save_message(tenant_id, uid, chat_id, "assistant", reply, images=generated_images)
     # usage_log書き込み
     try:
         _ulog_db2 = get_db()
-        _ulog_db2.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False})
+        _ulog_db2.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False, "purpose_mode": getattr(req, "purpose_mode", "auto")})
     except Exception:
         pass
-    return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=generated_images)
+    _safe_images = [{"mime_type": img.get("mime_type","image/png"), "gcs_url": img.get("gcs_url","")} for img in generated_images]
+    return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=_safe_images)
 
 
 # ============================================================
@@ -1537,6 +2356,11 @@ class FileAnalysisRequest(BaseModel):
 @router.post("/send_file")
 def send_file(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
     uid = payload["uid"]
+    from api.core.features import is_feature_enabled as _isfe_tier
+    if req.ai_tier in ("ultra", "apex"):
+        _tier_feat = "ascend_ultra" if req.ai_tier == "ultra" else "ascend_apex"
+        if not _isfe_tier(uid, _tier_feat):
+            raise HTTPException(status_code=403, detail=f"このAIエンジン（{req.ai_tier}）は現在未開放のため使用できません。")
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
     chat_id = (req.chat_id or "main").strip() or "main"
     _ensure_session(tenant_id, uid, chat_id)
@@ -1616,7 +2440,7 @@ def send_file(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
     # usage_log書き込み
     try:
         _ulog_db3 = get_db()
-        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False})
+        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False, "purpose_mode": getattr(req, "purpose_mode", "auto")})
     except Exception:
         pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[], structured=_inv_structured)
@@ -1633,6 +2457,11 @@ class InvestRequest(BaseModel):
 @router.post("/send_invest")
 def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
     uid = payload["uid"]
+    from api.core.features import is_feature_enabled as _isfe_tier
+    if req.ai_tier in ("ultra", "apex"):
+        _tier_feat = "ascend_ultra" if req.ai_tier == "ultra" else "ascend_apex"
+        if not _isfe_tier(uid, _tier_feat):
+            raise HTTPException(status_code=403, detail=f"このAIエンジン（{req.ai_tier}）は現在未開放のため使用できません。")
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
     chat_id = (req.chat_id or "main").strip() or "main"
     _ensure_session(tenant_id, uid, chat_id)
@@ -1724,7 +2553,7 @@ def send_invest(req: InvestRequest, payload: dict = Depends(verify_token)):
     # usage_log書き込み
     try:
         _ulog_db3 = get_db()
-        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False})
+        _ulog_db3.collection("usage_logs").add({"user_id": uid, "tenant_id": tenant_id, "prompt": req.message[:200], "timestamp": (datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"), "is_admin_test": False, "purpose_mode": getattr(req, "purpose_mode", "auto")})
     except Exception:
         pass
     return ChatResponse(reply=reply, chat_id=chat_id, msg_id=str(uuid.uuid4()), cases=[], images=[])
@@ -1735,6 +2564,8 @@ def get_image_gallery(payload: dict = Depends(verify_token)):
     """生成画像ギャラリー一覧取得"""
     from api.core.features import is_feature_enabled
     uid = payload["uid"]
+    if not is_feature_enabled(uid, "image_gallery"):
+        raise HTTPException(status_code=403, detail="生成画像ギャラリーは現在未開放のため使用できません。")
     tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
     db = get_db()
     try:
@@ -1754,6 +2585,8 @@ def delete_image(image_id: str, payload: dict = Depends(verify_token)):
     """生成画像を削除"""
     from api.core.features import is_feature_enabled
     uid = payload["uid"]
+    if not is_feature_enabled(uid, "image_gallery"):
+        raise HTTPException(status_code=403, detail="生成画像ギャラリーは現在未開放のため使用できません。")
     db = get_db()
     try:
         # Firestoreから削除
@@ -1761,6 +2594,18 @@ def delete_image(image_id: str, payload: dict = Depends(verify_token)):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@router.get("/image_b64")
+def get_image_b64(url: str, payload: dict = Depends(verify_token)):
+    """GCS画像をbase64で返すプロキシ"""
+    import urllib.request, base64 as _b64p
+    try:
+        with urllib.request.urlopen(url, timeout=15) as _rp:
+            _data = _rp.read()
+            _mime = (_rp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
+        return {"b64": _b64p.b64encode(_data).decode(), "mime": _mime}
+    except Exception as _pe:
+        raise HTTPException(status_code=400, detail=str(_pe))
+
 # DEBUG REMOVE LATER
 
 # ============================================================
@@ -1785,6 +2630,9 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
             _ensure_session(tenant_id, uid, chat_id)
             history = _load_history(tenant_id, uid, chat_id)
             base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
+            # ── ASCEND静的辞書ヒット検出（推奨モード用・send_stream） ──
+            _ascend_dict_key, _ascend_dict_text = _ascend_static_answer(req.message)
+            _ascend_dict_hit = bool(_ascend_dict_key and _ascend_dict_text)
             chat_mode = (req.chat_mode or "consult").strip().lower()
             is_talk = chat_mode == "talk"
             _is_custom_replace = False
@@ -1830,14 +2678,8 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
                     or _u_doc.get("plan") in ("apex", "ultra_admin")
                 )
                 if _need_admin_rag:
-                    # 1次: tenant_id フィルターで検索
-                    _ads = list(get_db().collection("users").where("tenant_id", "==", tenant_id).limit(50).stream())
-                    for _ad in _ads:
-                        _add = _ad.to_dict() or {}
-                        if _add.get("plan") in ("ultra_admin",):
-                            _admin_uid = _ad.id
-                            break
-                    # 2次フォールバック: 廃止（200件フルスキャンは遅延の原因）
+                    _admin_uid = _get_admin_uid(tenant_id)
+                    # キャッシュ優先: インメモリ→tenant_settings→初回のみスキャン
             except Exception:
                 pass
             _rc_pre = []  # _rc_pre廃止: _rcと一本化
@@ -1904,11 +2746,7 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
                 except Exception as _infer_err:
                     print('INFER_ERR:', _infer_err, flush=True)
             # --- デバッグprint除去済み ---
-            try:
-                _u_pre = get_db().collection("users").document(uid).get()
-                _has_custom_pre = bool((_u_pre.to_dict() or {}).get("custom_sys_prompt","")) if _u_pre.exists else False
-            except Exception:
-                _has_custom_pre = False
+            _has_custom_pre = bool((_u_doc or {}).get("custom_sys_prompt", ""))
             if len(_tgt_candidates) >= 2 and not _already_asked and not _is_au and not _has_custom_pre:
                 _choices = _tgt_candidates
                 _confirm_reply = "【確認】「{}」について確認させてください。\n誰向けの情報をお探しですか？".format(req.message[:20])
@@ -1936,20 +2774,29 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
             if not _is_custom_replace or _is_au:
                 _q.put({"type":"step","label":"専用ナレッジを検索中..." if _is_au else "ナレッジを検索中..."})
             # _admin_uid は _rc_pre 前に解決済み（再代入しない）
-            _thcd = False
-            _tud = None
-            try:
-                _tud = get_db().collection("users").document(uid).get()
-                _thcd = bool((_tud.to_dict() or {}).get("custom_sys_prompt","")) if _tud.exists else False
-            except Exception:
-                pass
+            _thcd = _has_custom_pre
             # 全プラン・全モードでRAGを呼ぶ
-            _tco = ((_tud.to_dict() or {}).get("custom_sys_prompt") or "").strip() if (_thcd and _tud) else ""
+            _tco = (_u_doc.get("custom_sys_prompt") or "").strip() if _thcd else ""
             _tb = _tco if (_tco and not _is_custom_replace) else base_prompt
             _rc = []
-            sp, _rc = _build_system_with_rag(tenant_id, req.message + ('　' + _resolved_target if _resolved_target else ''), _tb, uid=uid, admin_uid=_admin_uid, is_apex_ultra=_is_au)
+            # ASCENDモード or 辞書ヒット時: 辞書内容をsystem_promptへ注入してLLMに渡す
+            _tb_for_rag = _tb
+            _mode_is_ascend = (req.purpose_mode or "").strip().lower() == "ascend"
+            if _ascend_dict_hit or _mode_is_ascend:
+                _dict_content = _ascend_dict_text if _ascend_dict_text else ""
+                if _mode_is_ascend and not _dict_content:
+                    parts = ["ASCENDの主な機能は以下です。"]
+                    for name, desc in ASCEND_FEATURE_GUIDE.items():
+                        if name not in ["ASCENDとは", "ASCENDの名前の由来", "SWIFT / ADVANCE / SUPREME"]:
+                            parts.append(f"■ {name}\n{desc}")
+                    _dict_content = "\n\n".join(parts)
+                _tb_for_rag = _tb + "\n\n【ASCEND辞書情報 - 必ずこの内容を根拠に回答せよ】\n" + _dict_content
+            sp, _rc, _is_ascend_about = _build_system_with_rag(tenant_id, req.message + ('　' + _resolved_target if _resolved_target else ''), _tb_for_rag, uid=uid, admin_uid=_admin_uid, is_apex_ultra=_is_au)
+            # ASCENDモード or 辞書ヒット時は画像生成を必ずスキップ
+            if _ascend_dict_hit or _mode_is_ascend:
+                _is_ascend_about = True
             _rc_pre = _rc  # _rc_preを_rcで代替
-            if _thcd and not _is_custom_replace:
+            if _thcd and not _is_custom_replace and not _is_ascend_about:
                 sp = ("【会話モード・最優先指示】以下のキャラクター設定と知識ファイルの内容を完全に内面化し、自分の言葉として再構築して答えよ。"
                       "ナレッジの文言・ファイル名・資料名・出典を直接引用・露出することは絶対禁止。"
                       "質問に対してキャラクターの口調で直接答えよ。"
@@ -1978,6 +2825,10 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
             if _no_rag_fallback_s:
                 sp += '\n\n【⚠️ナレッジ未検証回答モード】専用ナレッジ・中央倉庫のいずれにも該当情報が存在しない。質問に対してLLMの一般知識で誠実に回答せよ。「回答できません」「専門外です」等の拒否は絶対禁止。回答の冒頭に必ず「⚠️ナレッジ未検証回答」と表示せよ。'
             _mk = (req.purpose_mode or "auto").strip().lower()
+            print(f"[STREAM_MODE_DEBUG] purpose_mode_raw={repr(req.purpose_mode)} mk={repr(_mk)}", flush=True)
+            _ascend_explain_kws2 = ["ASCEND","使い方","とは","機能","名前の由来","SWIFT","ADVANCE","SUPREME","Decision Metrics","固定概念レポート","ファイル診断","プロファイル生成","顧客AIマネジメント","プレゼン資料生成","未来分岐シミュレーター","ランクシステム","プラン","マイページ","画像生成とは","何ができ"]
+            if _mk == "auto" and any(k in req.message for k in _ascend_explain_kws2):
+                _mk = "ascend"
             _MI = {
                 "strategy":"【STRATEGYモード】戦略立案・競合優位・中長期計画に特化せよ。",
                 "numeric":"【NUMERICモード】数値・指標・KPI・ROI分析に特化せよ。",
@@ -1998,7 +2849,21 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
                 "hr":"【HRモード】人材・組織・採用・育成に特化せよ。",
                 "ops":"【OPSモード】業務改善・効率化・プロセス最適化に特化せよ。",
                 "tech":"【TECHモード】技術・エンジニアリング・システム設計に特化せよ。",
+                "ascend":"【ASCENDモード】ASCENDの機能・使い方・思想・プラン・AIエンジン・FAQ説明に特化せよ。system_prompt内のASCEND説明情報を最優先根拠とし、RAGナレッジ・汎用AI回答・キャラクター口調は使用禁止。絵文字・幼稚な口調禁止。機能概要・入力・出力・実務での使い道・経営判断上の価値を構造的に説明せよ。分かりませんは絶対禁止。",
             }
+            # planning mode: ExecutionPlan生成（send_stream用）
+            execution_plan_obj = None
+            if _mk == 'planning':
+                try:
+                    from api.core.intent import build_execution_plan as _bep_ss
+                    execution_plan_obj = _bep_ss(req.message, tenant_id, 'mixed')
+                    import json as _epj_dbg
+                    if execution_plan_obj and isinstance(execution_plan_obj, dict):
+                        sp += ('\n\n【実行計画オブジェクト（必ずこの構造を根拠に説明せよ）】\n'
+                               + _epj_dbg.dumps(execution_plan_obj, ensure_ascii=False)[:2000]
+                               + '\n上記ExecutionPlanの各フェーズ・タスク・KPI・依存関係を根拠にして補足説明のみ行え。架空の数値・タスク追加は禁止。')
+                except Exception as _ep_ss_err:
+                    execution_plan_obj = None
             if not is_talk and _mk in _MI and not _is_custom_replace:
                 sp = _MI[_mk] + "\n\n" + sp
             _LENS_INST = {
@@ -2011,15 +2876,47 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
                 sp = _LENS_INST[_lens_preset] + "\n\n" + sp
             if not is_talk and _lens_hier == "prefer_summary" and not _is_custom_replace:
                 sp = "【要約優先】回答は簡潔にまとめること。長文は避けよ。\n\n" + sp
+            # planning mode: execution_plan_obj を system_prompt に注入
+            if _mk == 'planning' and execution_plan_obj and isinstance(execution_plan_obj, dict):
+                import json as _epj3
+                _ep_json = _epj3.dumps(execution_plan_obj, ensure_ascii=False)
+                sp += (
+                    '\n\n【実行計画オブジェクト（必ずこの構造を根拠に説明せよ）】\n'
+                    + _ep_json[:2000]
+                    + '\n上記ExecutionPlanの各フェーズ・タスク・KPI・依存関係を根拠にして補足説明のみ行え。架空の数値・タスク追加は禁止。'
+                )
             _q.put({"type":"step","label":"回答を構築中..."})
+            if _is_ascend_about:
+                _q.put({"type":"step","label":"ASCEND情報を構築中..."})
+                msgs = history + [{"role":"user","content":req.message}]
+                try:
+                    reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier, uid=uid)
+                except Exception as _e:
+                    reply = f"エラー: {_e}"
+                import uuid as _uuid_asc
+                _q.put({"type":"done","reply":reply,"chat_id":chat_id,"msg_id":str(_uuid_asc.uuid4()),"cases":[],"images":[],"structured":None,"sources":[],"intent":{},"intent_label":"ascend"})
+                return
             gi = []
-            if _is_image_gen_request(req.message):
+            from api.core.features import is_feature_enabled as _isfe_img
+            if _is_image_gen_request(req.message) and _isfe_img(uid, "image_generation") and not _is_ascend_about:
                 try: reply, gi = _generate_image(req.message)
                 except Exception as _e: reply = f"画像生成エラー: {_e}"
+            elif _is_image_gen_request(req.message) and not _is_ascend_about:
+                reply = "画像生成は現在未開放のため使用できません。"
             else:
                 msgs = history + [{"role":"user","content":req.message}]
-                try: reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier)
-                except Exception as _e: reply = f"エラー: {_e}"
+                import threading as _th_llm
+                _llm_res = {}
+                def _do_llm():
+                    try: _llm_res["r"] = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier, uid=uid)
+                    except Exception as _e: _llm_res["r"] = f"エラー: {_e}"
+                _llm_t = _th_llm.Thread(target=_do_llm, daemon=True)
+                _llm_t.start()
+                while _llm_t.is_alive():
+                    _llm_t.join(timeout=4)
+                    if _llm_t.is_alive():
+                        _q.put({"type":"step","label":"回答を生成中..."})
+                reply = _llm_res.get("r", "エラー: LLM応答なし")
 
             _q.put({"type":"step","label":"回答を整形中..."})
             cases = []
@@ -2036,6 +2933,59 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
                     _mf2 = _mk != 'auto'
                     _isc2 = (not is_talk) and (_mf2 or ((not _iti2) and (any(i in _qpi2 for i in _ci2))))
                     if not gi and _isc2:
+                        # ── planning mode: execution_plan_obj から直接structured生成（reply再解釈禁止）──
+                        if _mk == 'planning' and execution_plan_obj and isinstance(execution_plan_obj, dict):
+                            _tasks = execution_plan_obj.get('tasks', [])
+                            _plan_valid = all(
+                                t.get('due_days') and t.get('owner') and t.get('owner') != '担当者未定'
+                                and t.get('kpi') and t.get('kpi') != '未設定'
+                                and isinstance(t.get('dependencies'), list)
+                                for t in _tasks
+                            ) if _tasks else False
+                            if not _plan_valid:
+                                print('[EXEC_PLAN] 必須4項目欠落のためstructured=None', flush=True)
+                                return
+                            _ep_current = [
+                                f"[{t.get('phase','')}] {t.get('objective','')} / 期限:{t.get('due_days','')}日 / 担当:{t.get('owner','')} / KPI:{t.get('kpi','')}"
+                                for t in _tasks[:3]
+                            ]
+                            _ep_risk = execution_plan_obj.get('risks', [])[:3]
+                            _ep_plan = [
+                                f"{t.get('objective','')} → 依存:{', '.join(t.get('dependencies',[]) or ['なし'])}"
+                                for t in _tasks[:3]
+                            ]
+                            import json as _epj2
+                            _ep_structured = {
+                                'summary': execution_plan_obj.get('summary', req.message[:60]),
+                                'execution_plan': {
+                                    'phases': execution_plan_obj.get('phases', []),
+                                    'tasks': _tasks,
+                                    'dependencies': execution_plan_obj.get('dependencies', []),
+                                    'blockers': execution_plan_obj.get('blockers', []),
+                                    'kpis': execution_plan_obj.get('kpis', []),
+                                    'checkpoints': execution_plan_obj.get('checkpoints', []),
+                                    'risks': execution_plan_obj.get('risks', []),
+                                    'graph': execution_plan_obj.get('graph', {}),
+                                    'critical_path': execution_plan_obj.get('critical_path', []),
+                                },
+                                'cards': {
+                                    'current': _ep_current if _ep_current else ['実行計画を生成しました'],
+                                    'risk': _ep_risk if _ep_risk else ['リスク情報なし'],
+                                    'plan': _ep_plan if _ep_plan else ['プラン情報なし'],
+                                },
+                                'analysis': {
+                                    'type': '実行計画',
+                                    'urgency': '高',
+                                    'importance': '高',
+                                    'mode': 'PLANNING',
+                                },
+                                'actions': [t.get('objective', '') for t in _tasks[:5] if t.get('objective')],
+                                'value_message': f"実行計画: {len(_tasks)}タスク / フェーズ:{len(execution_plan_obj.get('phases',[]))}段階",
+                            }
+                            _struct_res['v'] = _ep_structured
+                            print(f'[EXEC_PLAN] planning structured生成完了 tasks={len(_tasks)}', flush=True)
+                            return
+                        # ── planning以外: 既存のreply再解釈ロジック ──
                         import json as _jss2, re as _rss2
                         _mu2 = _mk.upper() if _mk != 'auto' else ''
                         _ml2 = f'modeは必ず {_mu2} で固定（変更禁止）\n' if _mu2 else 'modeは問いの内容に応じてSTRATEGY/NUMERIC/DIAGNOSIS/PLANNING/RISK/MARKETING/FINANCE/HRから選択\n'
@@ -2052,26 +3002,24 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
                 try:
                     if not gi:
                         _cp2 = f'以下の会話に対して、ユーザーが次に相談しそうな事案を必ず3件、日本語で1行ずつ返せ。必ず3行出力すること。番号・記号・マーク不要。\nQ: {req.message}\nA: {reply[:500]}'
-                        print(f"[CASES_STREAM_START] is_talk={is_talk} skip={_skip_secondary}", flush=True)
                         _cr2 = call_llm(system_prompt='必ず3行のみ出力。番号・記号・前置き禁止。3件未満は禁止。', messages=[{'role':'user','content':_cp2}], ai_tier='core', max_tokens=512)
                         _cases_res['v'] = [l.strip() for l in _cr2.strip().split('\n') if l.strip()][:3]
-                        print(f"[CASES_STREAM_DONE] raw={repr(_cr2[:200])} count={len(_cases_res.get('v',[]))}", flush=True)
                     else:
-                        print(f"[CASES_STREAM_SKIP] gi={bool(gi)}", flush=True)
+                        pass
                 except Exception as _ce2:
-                    print(f"[CASES_STREAM_ERROR] {type(_ce2).__name__}: {_ce2}", flush=True)
+                    pass
             _ts2 = _th_sec.Thread(target=_run_structured, daemon=True)
             if not _skip_secondary:
                 _ts2 = _th_sec.Thread(target=_run_structured, daemon=True)
                 _tc2 = _th_sec.Thread(target=_run_cases, daemon=True)
                 _ts2.start(); _tc2.start()
-                _tc2.join(timeout=20)
-                _ts2.join(timeout=15)
+                _tc2.join(timeout=8)
+                _ts2.join(timeout=6)
             elif is_talk and not gi:
                 # 会話モードは_skip_secondaryでもcasesだけは必ず生成
                 _tc2 = _th_sec.Thread(target=_run_cases, daemon=True)
                 _tc2.start()
-                _tc2.join(timeout=20)
+                _tc2.join(timeout=8)
             structured = _struct_res.get('v')
             cases = _cases_res.get('v') or []
             reply = __import__("re").sub(r" {2,}", " ", reply).strip()
@@ -2080,7 +3028,6 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
             if _rc and not _plan_hit:
                 _ss_max = max((float(_sck.get("_score",0)) for _sck in _rc), default=0.0)
                 _ss_retrieved = len(_rc) > 0
-                print(f"[RAG_RETRIEVED][stream] max_score={_ss_max:.3f} is_retrieved={_ss_retrieved} chunks={len(_rc)}", flush=True)
                 _ss_sources=[{"text":(_sck.get("text","") or "")[:200],"score":float(_sck.get("_score",0)),"source_id":str(_sck.get("source_id","")),"is_retrieved":True} for _sck in _rc]
             elif _plan_hit:
                 _ss_sources = []
@@ -2115,6 +3062,11 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
                 _ist_safe = _jsc.loads(_jsc.dumps(ist if isinstance(ist,dict) else {}, default=str))
             except Exception:
                 _ist_safe = {}
+            # ASCEND辞書ヒット時: 推奨をcasesの先頭に追加
+            if _ascend_dict_hit:
+                _asugg = f"【ASCEND】{_ascend_dict_key}について詳しく教えて"
+                if _asugg not in cases:
+                    cases = [_asugg] + cases[:2]
             _q.put({"type":"done","reply":reply,"chat_id":chat_id,"msg_id":str(uuid.uuid4()),"cases":cases,"images":gi,"structured":structured,"sources":_ss_sources,"intent":_ist_safe,"intent_label":_il})
         except Exception as _e:
             _q.put({"type":"error","message":str(_e)})
@@ -2122,16 +3074,20 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
             _q.put(_DONE)
     _thm.Thread(target=_worker, daemon=True).start()
     def _gen():
-        import time as _t
+        import time as _t, queue as _qmod
         while True:
-            item = _q.get()
+            try:
+                item = _q.get(timeout=3)
+            except _qmod.Empty:
+                yield ": keepalive\n\n"
+                continue
             if item is _DONE: break
             try:
                 if isinstance(item, dict) and item.get("type") == "done":
-                    print(f"[SSE_DONE_YIELD] reply_len={len(item.get('reply',''))} sources={len(item.get('sources',[]))} cases={item.get('cases',[])}", flush=True)
+                    pass
                 yield _sse_evt(item)
                 if isinstance(item, dict) and item.get("type") == "done":
-                    print(f"[SSE_DONE_YIELD_OK]", flush=True)
+                    pass
             except Exception as _ge:
                 print(f"[SSE_GEN_ERR] {type(_ge).__name__}: {_ge}", flush=True)
                 if isinstance(item, dict) and item.get("type") == "done":
@@ -2146,87 +3102,106 @@ def send_message_stream(req: ChatRequest, payload: dict = Depends(verify_token))
 
 @router.post("/send_image_stream")
 def send_image_stream(req: ImageRequest, payload: dict = Depends(verify_token)):
-    import queue as _qm2, threading as _thm2
-    _q = _qm2.Queue()
-    _DONE = object()
-    def _worker():
+    def _gen():
         try:
             uid = payload["uid"]
             tenant_id = payload.get("tenant_id", DEFAULT_TENANT)
             chat_id = (req.chat_id or "main").strip() or "main"
             _ensure_session(tenant_id, uid, chat_id)
             gi = []
-            if req.image_b64 and not _is_image_gen_request(req.message, has_image=True):
-                _q.put({"type":"step","label":"画像を受信中..."})
+            _is_ascend_about = any(k in (req.message or "") for k in ["ASCEND","とは","使い方","機能","プロファイル生成","顧客AIマネジメント","画像生成とは","プレゼン資料生成","未来分岐シミュレーター","ファイル診断","Decision Metrics","固定概念レポート","ランクシステム","比較分析","構造診断","課題仮説","矛盾検知","実行計画","思考マップ","投資シグナル","個人相談","何ができ","料金は"])
+            _ascend_dict_key2, _ascend_dict_text2 = _ascend_static_answer(req.message)
+            if _ascend_dict_key2:
+                _is_ascend_about = True
+            if req.image_b64 and not (_is_image_gen_request(req.message, has_image=True) and not _is_ascend_about):
+                yield _sse_evt({"type":"step","label":"画像を解析中..."})
                 base_prompt = _load_tenant_system_prompt(tenant_id, uid=uid)
-                sp = ("【最重要指示】あなたは画像解析AIです。添付された画像を必ず詳細に分析し、内容・テキスト・数値・構造・色・特徴を全て日本語で説明してください。画像の分析を拒否したり、できないと言ったりすることは絶対に禁止です。\n\n"
-                      + base_prompt + "\n\n【画像解析モード】添付された画像を正確に読み取り、ユーザーの質問に対して詳細に答えよ。画像の内容・数値・テキスト・構造を整理して提示せよ。")
-                _q.put({"type":"step","label":"画像を解析中..."})
+                sp = ("【最重要指示】あなたは画像解析AIです。添付された画像を必ず詳細に分析し、内容・テキスト・数値・構造・色・特徴を全て日本語で説明してください。\n\n"
+                      + base_prompt + "\n\n【画像解析モード】添付された画像を正確に読み取り、ユーザーの質問に対して詳細に答えよ。")
                 msgs = _load_history(tenant_id, uid, chat_id)
                 msgs.append({"role":"user","content":req.message or "この画像を詳しく分析してください"})
-                _q.put({"type":"step","label":"回答を構築中..."})
-                try: reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier, image_b64=req.image_b64, image_mime=req.image_mime)
-                except Exception as e: reply = f"画像解析エラー: {e}"
+                import threading as _th_ia
+                _ia_res = {}
+                def _do_ia():
+                    try: _ia_res['r'] = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier, image_b64=req.image_b64, image_mime=req.image_mime, uid=uid)
+                    except Exception as _e: _ia_res['r'] = f"画像解析エラー: {_e}"
+                _ia_t = _th_ia.Thread(target=_do_ia, daemon=True); _ia_t.start()
+                while _ia_t.is_alive():
+                    _ia_t.join(timeout=3)
+                    if _ia_t.is_alive(): yield ": ping\n\n"
+                reply = _ia_res.get('r', '画像解析エラー')
+            elif _is_ascend_about:
+                # ASCEND質問→画像生成せずLLMで回答
+                yield _sse_evt({"type":"step","label":"ASCEND情報を構築中..."})
+                _bp2 = """あなたはASCENDのコンサルティングAIです。
+ASCENDの機能・使い方・プラン・思想について質問された場合、以下のルールで回答せよ。
+【禁止】絵文字・幼稚な口調・キャラクターAI口調（〜だよ・相棒・寄り添う等）・感情的な前置き・「ありがとうございます」等の過剰な挨拶
+【必須】経営判断OS・構造解析エンジン・戦略実行支援基盤として説明せよ。具体的・簡潔・実務的に回答せよ。"""
+                _adk3, _adt3 = _ascend_static_answer(req.message)
+                if _adt3:
+                    _bp2 = _bp2 + "\n\n【ASCEND辞書情報 - 必ずこの内容を根拠に回答せよ】\n" + _adt3
+                _msgs2 = _load_history(tenant_id, uid, chat_id)
+                _msgs2.append({"role":"user","content":req.message})
+                try: reply = call_llm(system_prompt=_bp2, messages=_msgs2, ai_tier=req.ai_tier, uid=uid)
+                except Exception as _e2: reply = f"エラー: {_e2}"
             else:
-                _q.put({"type":"step","label":"プロンプトを設計中..."})
-                _q.put({"type":"step","label":"画像を生成中..."})
-                try: reply, gi = _generate_image(req.message, req.image_b64, req.image_mime)
-                except Exception as e:
-                    reply = f"画像生成エラー: {e}"
-                    gi = []
-            _q.put({"type":"step","label":"最終調整中..."})
+                yield _sse_evt({"type":"step","label":"画像を生成中..."})
+                import threading as _th_ig
+                _ig_res = {}
+                def _do_ig():
+                    try: _ig_res['r'], _ig_res['gi'] = _generate_image(req.message, req.image_b64, req.image_mime)
+                    except Exception as _e: _ig_res['r'] = f"画像生成エラー: {_e}"; _ig_res['gi'] = []
+                _ig_t = _th_ig.Thread(target=_do_ig, daemon=True); _ig_t.start()
+                while _ig_t.is_alive():
+                    _ig_t.join(timeout=3)
+                    if _ig_t.is_alive(): yield ": ping\n\n"
+                reply = _ig_res.get('r', '画像生成エラー')
+                gi = _ig_res.get('gi', [])
+            yield _sse_evt({"type":"step","label":"最終調整中..."})
+            # GCS upload
             if gi:
                 try:
                     import os as _os2, base64 as _b642
                     from google.cloud import storage as _gcs2
-                    bn = _os2.environ.get("CENTRAL_BLOB_BUCKET","").strip()
-                    if bn:
-                        _gc2 = _gcs2.Client(); _bkt2 = _gc2.bucket(bn)
-                        for _ii, _img in enumerate(gi):
-                            try:
+                    import concurrent.futures as _cff3
+                    def _gcs_up():
+                        try:
+                            bn = _os2.environ.get("CENTRAL_BLOB_BUCKET","").strip()
+                            if not bn: return
+                            _gc2 = _gcs2.Client(); _bkt2 = _gc2.bucket(bn)
+                            for _ii, _img in enumerate(gi):
                                 _ib = _b642.b64decode(_img["data"])
                                 _ext = "png" if "png" in _img.get("mime_type","") else "jpg"
-                                _path = f"chat_images/{tenant_id}/{uid}/{uuid.uuid4().hex[:8]}.{_ext}"
+                                _path = f"chat_images/{tenant_id}/{uid}/{__import__('uuid').uuid4().hex[:8]}.{_ext}"
                                 _bl = _bkt2.blob(_path)
-                                _bl.upload_from_string(_ib, content_type=_img.get("mime_type","image/png"))
+                                _bl.upload_from_string(_ib, content_type=_img.get("mime_type","image/png"), timeout=30)
                                 gi[_ii]["gcs_url"] = f"https://storage.googleapis.com/{bn}/{_path}"
-                            except Exception: pass
+                        except Exception: pass
+                    _exc3 = _cff3.ThreadPoolExecutor(max_workers=1)
+                    try: _exc3.submit(_gcs_up).result(timeout=5)
+                    except Exception: pass
+                    finally: _exc3.shutdown(wait=False)
                 except Exception: pass
-            # Firestoreに画像記録
-            _db_sis = get_db()
+            # Firestore save
             for _img in gi:
                 try:
-                    _img_id = uuid.uuid4().hex
-                    _db_sis.collection("image_gallery").document(uid).collection("images").document(_img_id).set({
-                        "image_id": _img_id,
-                        "uid": uid,
-                        "tenant_id": tenant_id,
-                        "gcs_url": _img.get("gcs_url",""),
-                        "mime_type": _img.get("mime_type","image/png"),
-                        "prompt": (req.message or "")[:500],
-                        "created_at": __import__("datetime").datetime.utcnow().isoformat(),
-                    })
-                    print(f"[GALLERY_STREAM_DEBUG] Firestore save OK uid={uid}", flush=True)
-                except Exception as _ge:
-                    print(f"[GALLERY_STREAM_DEBUG] Firestore save ERROR: {_ge}", flush=True)
+                    _iid = uuid.uuid4().hex
+                    get_db().collection("image_gallery").document(uid).collection("images").document(_iid).set({"image_id":_iid,"uid":uid,"tenant_id":tenant_id,"gcs_url":_img.get("gcs_url",""),"mime_type":_img.get("mime_type","image/png"),"prompt":(req.message or "")[:500],"created_at":__import__("datetime").datetime.utcnow().isoformat()})
+                except Exception: pass
             _save_message(tenant_id, uid, chat_id, "user", req.message)
             reply = __import__("re").sub(r" {2,}", " ", reply).strip()
-            _save_message(tenant_id, uid, chat_id, "assistant", reply, images=gi)
-            try: get_db().collection("usage_logs").add({"user_id":uid,"tenant_id":tenant_id,"prompt":req.message[:200],"timestamp":(datetime.datetime.utcnow() + datetime.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),"is_admin_test":False})
+            _gi_save = [{"mime_type":img.get("mime_type","image/png"),"gcs_url":img.get("gcs_url","")} for img in gi]
+            _save_message(tenant_id, uid, chat_id, "assistant", reply, images=_gi_save)
+            try: get_db().collection("usage_logs").add({"user_id":uid,"tenant_id":tenant_id,"prompt":req.message[:200],"timestamp":(__import__("datetime").datetime.utcnow()+__import__("datetime").timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),"is_admin_test":False})
             except Exception: pass
-            _q.put({"type":"done","reply":reply,"chat_id":chat_id,"msg_id":str(uuid.uuid4()),"cases":[],"images":gi,"structured":None})
+            if _is_image_gen_request(req.message, has_image=bool(req.image_b64)) and not _is_ascend_about and not gi:
+                yield _sse_evt({"type":"done","reply":"画像生成に失敗しました。モデルが画像を返しませんでした。指示を少し変えて再試行してください。","chat_id":chat_id,"msg_id":str(uuid.uuid4()),"cases":[],"images":[],"structured":None})
+            else:
+                yield _sse_evt({"type":"done","reply":reply,"chat_id":chat_id,"msg_id":str(uuid.uuid4()),"cases":[],"images":gi,"structured":None})
         except Exception as _e:
-            _q.put({"type":"error","message":str(_e)})
-        finally:
-            _q.put(_DONE)
-    _thm2.Thread(target=_worker, daemon=True).start()
-    def _gen():
-        while True:
-            item = _q.get()
-            if item is _DONE: break
-            yield _sse_evt(item)
+            yield _sse_evt({"type":"error","message":str(_e)})
+        yield ": done\n\n"
     return StreamingResponse(_gen(), media_type="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
-
 
 @router.post("/send_file_stream")
 def send_file_stream(req: FileAnalysisRequest, payload: dict = Depends(verify_token)):
@@ -2264,7 +3239,16 @@ def send_file_stream(req: FileAnalysisRequest, payload: dict = Depends(verify_to
             msgs.append({"role":"user","content":req.message + fc})
             _q.put({"type":"step","label":"構造を把握中..."})
             _q.put({"type":"step","label":"回答を構築中..."})
-            try: reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier)
+            if _is_ascend_about:
+                _q.put({"type":"step","label":"ASCEND情報を構築中..."})
+                msgs = history + [{"role":"user","content":req.message}]
+                try:
+                    reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier, uid=uid)
+                except Exception as _e:
+                    reply = f"エラー: {_e}"
+                _q.put({"type":"done","text":reply,"rag_chunks":[],"rag_used":False})
+                return
+            try: reply = call_llm(system_prompt=sp, messages=msgs, ai_tier=req.ai_tier, uid=uid)
             except Exception as e: reply = f"ファイル解析エラー: {e}"
             _q.put({"type":"step","label":"最終調整中..."})
             _save_message(tenant_id, uid, chat_id, "user", req.message)

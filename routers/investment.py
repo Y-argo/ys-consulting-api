@@ -10,6 +10,10 @@ router = APIRouter(prefix="/api/investment", tags=["investment"])
 @router.get("/signals")
 def get_investment_signals(payload: dict = Depends(verify_token)):
     """最新の投資シグナルを取得"""
+    from api.core.features import is_feature_enabled
+    _uid_inv = payload.get("uid", "")
+    if not is_feature_enabled(_uid_inv, "diag_investment"):
+        raise HTTPException(status_code=403, detail="投資シグナルは現在未開放のため使用できません。")
     db = get_db()
     try:
         docs = list(db.collection("investment_signals").limit(500).stream())
@@ -135,6 +139,9 @@ def push_signals_to_rag(body: dict = Body(...), payload: dict = Depends(verify_t
 @router.get("/analysis")
 def get_investment_analysis(payload: dict = Depends(verify_token)):
     """投資シグナル全データ+コンサル分析"""
+    from api.core.features import is_feature_enabled
+    if not is_feature_enabled(payload.get("uid", ""), "diag_investment"):
+        raise HTTPException(status_code=403, detail="投資シグナルは現在未開放のため使用できません。")
     from api.core.llm_client import call_llm
     db = get_db()
     try:
@@ -253,6 +260,9 @@ def get_investment_analysis(payload: dict = Depends(verify_token)):
 @router.post("/stock_analysis")
 def stock_analysis(body: dict = Body(...), payload: dict = Depends(verify_token)):
     """個別銘柄のコンサル分析"""
+    from api.core.features import is_feature_enabled
+    if not is_feature_enabled(payload.get("uid", ""), "diag_investment"):
+        raise HTTPException(status_code=403, detail="投資シグナルは現在未開放のため使用できません。")
     from api.core.llm_client import call_llm
     import re as _re, json as _json
     query = body.get("query", "").strip()

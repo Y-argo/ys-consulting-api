@@ -12,11 +12,13 @@ _CACHE_TTL = 300
 # ── LLMレスポンスキャッシュ（同一クエリのRPM節約） ──
 import hashlib as _hashlib
 _llm_cache: dict = {}
-_LLM_CACHE_TTL = 300  # 5分
+_LLM_CACHE_TTL = 60  # 1分
 
-def _make_cache_key(system_prompt: str, messages: list, ai_tier: str, max_tokens: int) -> str:
-    last_msg = messages[-1].get("content", "") if messages else ""
-    raw = f"{ai_tier}:{max_tokens}:{system_prompt[:200]}:{last_msg[:500]}"
+def _make_cache_key(system_prompt: str, messages: list, ai_tier: str, max_tokens: int, uid: str = "") -> str:
+    msg_text = "\n".join(str(m.get("role","")) + ":" + str(m.get("content","")) for m in (messages or []))
+    system_hash = _hashlib.sha256((system_prompt or "").encode("utf-8", errors="ignore")).hexdigest()
+    messages_hash = _hashlib.sha256(msg_text.encode("utf-8", errors="ignore")).hexdigest()
+    raw = f"{uid}:{ai_tier}:{max_tokens}:{system_hash}:{messages_hash}"
     return _hashlib.md5(raw.encode()).hexdigest()
 
 def _get_llm_cache(key: str):
@@ -50,16 +52,17 @@ def _list_available_models_cached(client) -> set:
 
 # モデル優先リスト（旧pick_model_candidatesと同仕様）
 _CORE_PREFERRED = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-2.0-flash-001",
     "gemini-2.0-flash-latest",
-    "gemini-2.5-flash",
     "gemini-2.0-flash-lite",
     "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
 ]
 # 画像解析専用モデル（visionサポート確認済み）
 _VISION_PREFERRED = [
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
     "gemini-1.5-pro",
@@ -67,6 +70,7 @@ _VISION_PREFERRED = [
 _ULTRA_PREFERRED = [
     "gemini-2.5-pro-preview-05-06",
     "gemini-2.5-pro",
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
 ]
 _APEX_PREFERRED = [
@@ -135,9 +139,10 @@ def call_llm(
     image_b64: str = None,
     image_mime: str = "image/png",
     tenant_id: str = None,
+    uid: str = "",
 ) -> str:
     # キャッシュチェック（secondary LLM呼び出しのRPM節約）
-    _ck = _make_cache_key(system_prompt, messages, ai_tier, max_tokens)
+    _ck = _make_cache_key(system_prompt, messages, ai_tier, max_tokens, uid)
     _cached = _get_llm_cache(_ck)
     if _cached:
         return _cached
@@ -208,8 +213,15 @@ def call_llm(
                         pass
                     if not _t2 and resp.candidates:
                         try:
-                            _finish_reason = str(resp.candidates[0].finish_reason)
-                            _t2 = resp.candidates[0].content.parts[0].text or ""
+                            _cand = resp.candidates[0]
+                            _finish_reason = str(getattr(_cand, "finish_reason", ""))
+                            _parts = getattr(getattr(_cand, "content", None), "parts", []) or []
+                            _texts = []
+                            for _p in _parts:
+                                _pt = getattr(_p, "text", "")
+                                if _pt:
+                                    _texts.append(_pt)
+                            _t2 = "\n".join(_texts).strip()
                         except Exception:
                             pass
                     if not _t2:
