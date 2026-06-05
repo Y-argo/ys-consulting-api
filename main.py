@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import ResponseValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from api.routers import auth, chat, diagnosis, user_stats, inquiry, ads, investment
+from api.routers import auth, chat, diagnosis, user_stats, inquiry, ads, investment, agent
 
 app = FastAPI(title="ASCEND API", version="1.0.0")
 
@@ -28,6 +28,7 @@ app.include_router(user_stats.router)
 app.include_router(inquiry.router)
 app.include_router(ads.router)
 app.include_router(investment.router)
+app.include_router(agent.router)
 
 @app.exception_handler(ResponseValidationError)
 async def response_validation_exception_handler(request: Request, exc: ResponseValidationError):

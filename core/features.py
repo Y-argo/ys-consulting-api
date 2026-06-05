@@ -22,6 +22,7 @@ FEATURE_REGISTRY = {
     "diag_future":              {"label": "未来分岐シミュレータータブ", "category": "診断タブ",  "default_enabled": False},
     "diag_profile":             {"label": "プロファイル生成タブ",         "category": "診断タブ",  "default_enabled": False},
     "diag_crm":                {"label": "顧客AIマネジメント",         "category": "診断タブ",  "default_enabled": False},
+    "agent_mode":              {"label": "エージェントモード",         "category": "エージェント", "default_enabled": False},
 }
 
 # STARTER:0円 / STANDARD:9800円 / PRO:39800円 / APEX:89800円
@@ -56,6 +57,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_future":              False,
         "diag_profile":             False,
         "diag_crm":                False,
+        "agent_mode":              False,
     },
     "standard": {
         "image_generation":        True,
@@ -78,6 +80,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_future":              False,
         "diag_profile":             False,
         "diag_crm":                False,
+        "agent_mode":              False,
     },
     "pro": {
         "image_generation":        True,
@@ -100,6 +103,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_future":              False,
         "diag_profile":             False,
         "diag_crm":                False,
+        "agent_mode":              False,
     },
     "apex": {
         "image_generation":        True,
@@ -122,6 +126,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_future":              True,
         "diag_profile":             True,
         "diag_crm":                True,
+        "agent_mode":              True,
     },
     # ULTRA企業契約: メンバー=PRO相当、管理者=APEX相当
     "ultra_member": {
@@ -145,6 +150,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_future":              True,
         "diag_profile":             True,
         "diag_crm":                True,
+        "agent_mode":              True,
     },
     "ultra_admin": {
         "image_generation":        True,
@@ -167,6 +173,7 @@ PLAN_FEATURE_MAP: dict[str, dict[str, bool]] = {
         "diag_future":              True,
         "diag_profile":             True,
         "diag_crm":                True,
+        "agent_mode":              True,
     },
 }
 

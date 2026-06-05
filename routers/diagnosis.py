@@ -4798,3 +4798,21 @@ async def crm_priority_batch(request: Request):
         return {"ok": True, "processed": len(processed), "time": now_hm}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/issue_history/{doc_id}")
+async def delete_issue_history(doc_id: str, payload: dict = Depends(verify_token)):
+    try:
+        uid = payload["uid"]
+        db = get_db()
+        doc = db.collection("user_diagnoses").document(doc_id).get()
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="not found")
+        data = doc.to_dict() or {}
+        if data.get("uid") != uid:
+            raise HTTPException(status_code=403, detail="forbidden")
+        db.collection("user_diagnoses").document(doc_id).delete()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

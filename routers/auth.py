@@ -71,10 +71,16 @@ def _get_user_corporate_info(uid: str) -> dict:
         pass
     return {"ultra_corporate": False, "ultra_role": "", "corporate_tenant_id": ""}
 
-def _make_token(uid: str, role: str, tenant_id: str = "default") -> str:
+def _make_token(
+    uid: str,
+    role: str,
+    tenant_id: str = "default",
+    plan: str = "STANDARD",
+) -> str:
     payload = {
         "uid": uid,
         "role": role,
+        "plan": plan,
         "tenant_id": tenant_id,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(days=JWT_EXPIRE_DAYS),
     }
@@ -101,6 +107,7 @@ class LoginResponse(BaseModel):
     token: str
     uid: str
     role: str
+    plan: str
     tenant_id: str
 
 @router.post("/login", response_model=LoginResponse)
@@ -108,8 +115,19 @@ def login(req: LoginRequest):
     if req.role == "admin":
         if not ADMIN_PASSWORD or req.password != ADMIN_PASSWORD:
             raise HTTPException(status_code=403, detail="管理者パスワードが正しくありません")
-        token = _make_token(uid="admin", role="admin", tenant_id="default")
-        return LoginResponse(token=token, uid="admin", role="admin", tenant_id="default")
+        token = _make_token(
+            uid="admin",
+            role="admin",
+            tenant_id="default",
+            plan="APEX",
+        )
+        return LoginResponse(
+            token=token,
+            uid="admin",
+            role="admin",
+            plan="APEX",
+            tenant_id="default",
+        )
     else:
         # Firestoreを1回だけ取得して認証・有効期限・tenant_id をまとめて処理
         import datetime as _dt_auth
@@ -140,9 +158,16 @@ def login(req: LoginRequest):
                 raise
             except Exception:
                 pass
-        # tenant_id取得
+        # tenant_id・plan取得
         tenant_id = _ud.get("tenant_id", "default") or "default"
-        token = _make_token(uid=req.uid, role="user", tenant_id=tenant_id)
+        plan = _ud.get("plan", "STANDARD") or "STANDARD"
+
+        token = _make_token(
+            uid=req.uid,
+            role="user",
+            tenant_id=tenant_id,
+            plan=plan,
+        )
         # last_login更新
         try:
             import datetime as _dt_ll
@@ -152,7 +177,13 @@ def login(req: LoginRequest):
             )
         except Exception:
             pass
-        return LoginResponse(token=token, uid=req.uid, role="user", tenant_id=tenant_id)
+        return LoginResponse(
+            token=token,
+            uid=req.uid,
+            role="user",
+            plan=plan,
+            tenant_id=tenant_id,
+        )
 
 @router.post("/logout")
 def logout():
@@ -160,7 +191,12 @@ def logout():
 
 @router.get("/me")
 def me(payload: dict = Depends(verify_token)):
-    return {"uid": payload["uid"], "role": payload["role"], "tenant_id": payload.get("tenant_id", "default")}
+    return {
+        "uid": payload["uid"],
+        "role": payload.get("role", "user"),
+        "plan": payload.get("plan", "STANDARD"),
+        "tenant_id": payload.get("tenant_id", "default"),
+    }
 
 from api.core.features import get_effective_feature_flags
 
